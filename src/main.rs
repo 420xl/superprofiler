@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod coordinator;
+mod utils;
 
 /// A smart profiler
 #[derive(Parser, Debug)]
@@ -14,5 +15,13 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    println!("Hello, world!");
+    // Eventually, we'll expand the CLI interface to allow connecting to already-running processes. But for now...
+
+    let command: String = args.command;
+    let process = coordinator::Process::from_command(&command);
+
+    match process {
+        Ok(_) => unimplemented!(),
+        Err(err) => eprintln!("error: {}", err),
+    }
 }
