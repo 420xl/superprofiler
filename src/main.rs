@@ -20,8 +20,14 @@ fn main() {
     let command: String = args.command;
     let process = coordinator::Process::from_command(&command);
 
-    match process {
-        Ok(_) => unimplemented!(),
-        Err(err) => eprintln!("error: {}", err),
-    }
+    let proc = match process {
+        Ok(proc) => proc,
+        Err(err) => {
+            panic!("error: {}", err);
+        }
+    };
+
+    nix::sys::wait::waitpid(proc.pid, None).expect("Process did not complete!");
+
+    eprintln!("[process completed]");
 }
