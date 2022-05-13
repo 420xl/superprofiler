@@ -2,6 +2,8 @@ use clap::Parser;
 
 mod coordinator;
 mod utils;
+mod analyzer;
+mod instruction;
 
 /// A smart profiler
 #[derive(Parser, Debug)]
@@ -15,19 +17,27 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    // Eventually, we'll expand the CLI interface to allow connecting to already-running processes. But for now...
-
+    // Eventually, we'll expand the CLI interface to allow connecting to already-running processes. But for now... 
     let command: String = args.command;
-    let process = coordinator::Process::from_command(&command);
+    let process = coordinator::Inferior::from_command(&command);
 
-    let proc = match process {
-        Ok(proc) => proc,
-        Err(err) => {
-            panic!("error: {}", err);
+    let mut counter = 0;
+
+    eprintln!("starting single stepping...");
+    
+    match process {
+        Ok(mut process) => {
+            loop {
+                match process.step() {
+                    Some(()) => counter += 1,
+                    None => break
+                }
+            }
         }
+        Err(e) => eprintln!("error: {:?}", e)
     };
 
-    nix::sys::wait::waitpid(proc.pid, None).expect("Process did not complete!");
-
+    println!("Iterated {} times", counter);
+    
     eprintln!("[process completed]");
 }
