@@ -29,12 +29,15 @@ fn main() {
         Ok(mut process) => {
             loop {
                 match process.step() {
-                    Some(()) => counter += 1,
-                    None => break
+                    Ok(_) => {
+                        // eprintln!("successfuly single stepped! total: {}", counter);
+                        counter += 1;
+                    },
+                    Err(_e) => break
                 }
             }
         }
-        Err(e) => eprintln!("error: {:?}", e)
+        Err(e) => eprintln!("error in spawning process: {:?}", e)
     };
 
     println!("Iterated {} times", counter);
