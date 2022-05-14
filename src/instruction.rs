@@ -1,5 +1,5 @@
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
-pub struct Instruction(u64);
+pub struct Instruction(pub u64);
 
 impl Instruction {
     #[cfg(target_arch = "arm")]
