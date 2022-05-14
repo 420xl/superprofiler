@@ -28,7 +28,7 @@ fn main() {
     match process {
         Ok(process) => {
             match coordinator::supervise(process) {
-                Ok(iterations) => eprintln!("[process completed, {} steps]", iterations),
+                Ok(steps) => eprintln!("[process completed, {} steps]", steps),
                 Err(err) => error!("error: {:?}", err)
             };
         }
