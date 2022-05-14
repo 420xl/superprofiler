@@ -1,18 +1,24 @@
+use crate::instruction::Instruction;
+use anyhow::anyhow;
+use anyhow::Result;
+use log::{debug, error};
 use nix;
-use nix::sys::{ptrace, signal};
 use nix::sys::signal::Signal;
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::sys::{ptrace, signal};
 use nix::unistd::Pid;
 use std::io;
 use std::os::unix::process::CommandExt;
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use std::process::Command;
+use std::sync::mpsc;
+use std::time;
 use std::time::SystemTime;
-use crate::instruction::Instruction;
-use anyhow::Result;
-use anyhow::anyhow;
-use log::debug;
 
-pub struct ExecutionState { pub time: SystemTime, pub address: u64, pub instruction: Instruction }
+pub struct ExecutionState {
+    pub time: SystemTime,
+    pub address: u64,
+    pub instruction: Instruction,
+}
 
 pub struct Inferior {
     pub pid: Pid, // Will also contain profiling data
@@ -70,9 +76,24 @@ impl Inferior {
     pub fn get_registers(&mut self) -> Result<libc::user_regs_struct> {
         Ok(ptrace::getregs(self.pid)?)
     }
+
+    pub fn read_memory(&mut self, addr: u64) -> Result<libc::c_long> {
+        Ok(ptrace::read(self.pid, addr as *mut libc::c_void)?)
+    }
+
+    pub fn get_execution_state(&mut self) -> Result<ExecutionState> {
+        let regs = self.get_registers()?;
+
+        let addr = regs.rip; // TODO: Make platform independent
+        Ok(ExecutionState {
+            address: addr,
+            instruction: Instruction(self.read_memory(addr)? as u64),
+            time: time::SystemTime::now(),
+        })
+    }
 }
 
-pub fn supervise(mut proc: Inferior) -> Result<u64> {
+pub fn supervise(tx: mpsc::Sender<ExecutionState>, mut proc: Inferior) -> Result<u64> {
     // Right now, we collect data and send it to the analyzer.
     // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
     let mut iterations = 0;
@@ -84,31 +105,31 @@ pub fn supervise(mut proc: Inferior) -> Result<u64> {
                     Signal::SIGTRAP => {
                         // Handle trap
                         debug!("Trapped!");
+                        match proc.get_execution_state() {
+                            Ok(state) => tx.send(state).expect("Could not send execution state!"),
+                            Err(err) => error!("Unable to send execution state: {:?}", err),
+                        }
                         proc.step()?;
                     }
-                    
-                    Signal::SIGSEGV => {
-                        return Err(anyhow!("Segmentation fault!"))
-                    }
-                    _ => {
-                        return Err(anyhow!("Signaled: {}", sig_num))
-                    }
+
+                    Signal::SIGSEGV => return Err(anyhow!("Segmentation fault!")),
+                    _ => return Err(anyhow!("Signaled: {}", sig_num)),
                 }
-            },
+            }
 
             Ok(WaitStatus::Exited(pid, exit_status)) => {
                 eprintln!("Process {} exited with status {}!", pid, exit_status);
                 return Ok(iterations);
-            },
+            }
 
-            Ok(status) =>  {
+            Ok(status) => {
                 eprintln!("Received status: {:?}", status);
                 ptrace::cont(proc.pid, None)?;
-            },
+            }
 
             Err(err) => {
                 return Err(err);
-            },
+            }
         }
     }
 }
