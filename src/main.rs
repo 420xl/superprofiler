@@ -8,7 +8,7 @@ mod utils;
 use std::sync::mpsc::channel;
 use std::thread;
 
-use log::{debug, error};
+use log::{debug, error, info};
 
 /// A smart profiler
 #[derive(Parser, Debug)]
@@ -26,16 +26,25 @@ fn main() {
     let command: String = args.command;
     let process = coordinator::Inferior::from_command(&command);
 
-    debug!("Starting...");
+    info!("Starting...");
     let (tx, rx) = channel::<coordinator::ExecutionState>();
+
+    let analyzer_thread = thread::spawn(|| {
+        analyzer::analyze(rx);
+    });
 
     match process {
         Ok(process) => {
             match coordinator::supervise(tx, process) {
-                Ok(iterations) => eprintln!("[process completed, {} steps]", iterations),
+                Ok(iterations) => info!("[process completed, {} steps]", iterations),
                 Err(err) => error!("error: {:?}", err),
             };
         }
-        Err(e) => eprintln!("error [spawning process]: {:?}", e),
+        Err(e) => error!("error [spawning process]: {:?}", e),
+    };
+
+    match analyzer_thread.join() {
+        Ok(_) => info!("[analyzer complete]"),
+        Err(err) => error!("error in analyzer: {:?}", err)
     };
 }
