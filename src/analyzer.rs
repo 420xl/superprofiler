@@ -1,8 +1,9 @@
 use crate::coordinator::ExecutionState;
 use crate::instruction::Instruction;
-use log::debug;
+use log::{debug, info};
 use std::collections::HashSet;
 use std::sync::mpsc;
+use crate::utils;
 
 pub struct CodeAnalyzer {
     known_branching_instructions: HashSet<Instruction>,
@@ -11,7 +12,7 @@ pub struct CodeAnalyzer {
 impl CodeAnalyzer {
     pub fn new() -> Self {
         Self {
-            known_branching_instructions: HashSet::new()
+            known_branching_instructions: HashSet::new(),
         }
     }
 
@@ -24,9 +25,11 @@ impl CodeAnalyzer {
                 // It's a branch! Add it to the known branching instructions.
                 self.known_branching_instructions
                     .insert(preceding.instruction);
-                debug!(
-                    "Detected branch instruction at {}: {:?}",
-                    preceding.address, preceding.instruction
+                info!(
+                    "Detected branch instruction at {}: {:?} (addr offset: {})",
+                    preceding.address,
+                    preceding.instruction,
+                    utils::offset(preceding.address, following.address)
                 );
             } else {
                 debug!(
@@ -50,7 +53,7 @@ pub fn analyze(rx: mpsc::Receiver<ExecutionState>) {
                     analyzer.ingest_single_step_sequence(state_buffer);
                     state_buffer = Vec::new();
                 }
-            },
+            }
             Err(_) => {
                 break;
             }

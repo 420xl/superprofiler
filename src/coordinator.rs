@@ -1,7 +1,7 @@
 use crate::instruction::Instruction;
 use anyhow::anyhow;
 use anyhow::Result;
-use log::{debug, error};
+use log::{debug, error, info};
 use nix;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -57,7 +57,7 @@ impl Inferior {
     }
 
     pub fn kill(&mut self) -> Result<()> {
-        println!("Killing running inferior (pid {})", self.pid);
+        info!("killing running inferior (pid {})", self.pid);
         Ok(ptrace::kill(self.pid)?)
     }
 
@@ -118,12 +118,12 @@ pub fn supervise(tx: mpsc::Sender<ExecutionState>, mut proc: Inferior) -> Result
             }
 
             Ok(WaitStatus::Exited(pid, exit_status)) => {
-                eprintln!("Process {} exited with status {}!", pid, exit_status);
+                info!("process {} exited with status {}!", pid, exit_status);
                 return Ok(iterations);
             }
 
             Ok(status) => {
-                eprintln!("Received status: {:?}", status);
+                info!("peceived status: {:?}", status);
                 ptrace::cont(proc.pid, None)?;
             }
 

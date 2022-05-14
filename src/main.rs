@@ -1,4 +1,5 @@
 use clap::Parser;
+extern crate pretty_env_logger;
 
 mod analyzer;
 mod coordinator;
@@ -20,6 +21,8 @@ struct Args {
 }
 
 fn main() {
+    pretty_env_logger::init();
+
     let args = Args::parse();
 
     // Eventually, we'll expand the CLI interface to allow connecting to already-running processes. But for now...
@@ -36,7 +39,7 @@ fn main() {
     match process {
         Ok(process) => {
             match coordinator::supervise(tx, process) {
-                Ok(steps) => eprintln!("[process completed, {} steps]", steps),
+                Ok(steps) => info!("[process completed, {} steps]", steps),
                 Err(err) => error!("error: {:?}", err),
             };
         }
@@ -45,6 +48,6 @@ fn main() {
 
     match analyzer_thread.join() {
         Ok(_) => info!("[analyzer complete]"),
-        Err(err) => error!("error in analyzer: {:?}", err)
+        Err(err) => error!("error in analyzer: {:?}", err),
     };
 }
