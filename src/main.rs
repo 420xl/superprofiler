@@ -5,6 +5,8 @@ mod utils;
 mod analyzer;
 mod instruction;
 
+use log::{debug, error};
+
 /// A smart profiler
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -21,26 +23,15 @@ fn main() {
     let command: String = args.command;
     let process = coordinator::Inferior::from_command(&command);
 
-    let mut counter = 0;
-
-    eprintln!("starting single stepping...");
+    eprintln!("Starting...");
     
     match process {
-        Ok(mut process) => {
-            loop {
-                match process.step() {
-                    Ok(_) => {
-                        // eprintln!("successfuly single stepped! total: {}", counter);
-                        counter += 1;
-                    },
-                    Err(_e) => break
-                }
-            }
+        Ok(process) => {
+            match coordinator::supervise(process) {
+                Ok(iterations) => eprintln!("[process completed, {} steps]", iterations),
+                Err(err) => error!("error: {:?}", err)
+            };
         }
-        Err(e) => eprintln!("error in spawning process: {:?}", e)
+        Err(e) => eprintln!("error [spawning process]: {:?}", e)
     };
-
-    println!("Iterated {} times", counter);
-    
-    eprintln!("[process completed]");
 }

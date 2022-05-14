@@ -10,6 +10,7 @@ use std::time::SystemTime;
 use crate::instruction::Instruction;
 use anyhow::Result;
 use anyhow::anyhow;
+use log::debug;
 
 pub struct ExecutionState { pub time: SystemTime, pub address: u64, pub instruction: Instruction }
 
@@ -40,17 +41,7 @@ impl Inferior {
         let pid = Pid::from_raw(child.unwrap().id() as i32);
         let inferior = Inferior { pid: pid };
 
-        // eprintln!("Attaching to {:?}...", pid);
-
-        // ptrace::seize(pid, ptrace::Options::empty())?;
-
-        match inferior.wait(None) {
-            Ok(WaitStatus::Stopped(_, signal::SIGTRAP)) => {
-                eprintln!("found sigtrap!");
-                Ok(inferior)
-            },
-            x => Err(anyhow!("unable to wait: {:?}", x))
-        }
+        Ok(inferior)
     }
 
     /// Calls waitpid on this inferior and returns a Status to indicate the state of the process
@@ -59,19 +50,65 @@ impl Inferior {
         Ok(waitpid(self.pid, options)?)
     }
 
-    pub fn resume(&mut self) -> Result<WaitStatus> {
-        ptrace::cont(self.pid, None)?;
-        self.wait(None)
-    }
-
-    pub fn kill(&mut self) -> Result<WaitStatus> {
+    pub fn kill(&mut self) -> Result<()> {
         println!("Killing running inferior (pid {})", self.pid);
-        ptrace::kill(self.pid)?;
-        self.wait(None)
+        Ok(ptrace::kill(self.pid)?)
     }
 
-    pub fn step(&mut self) -> Result<WaitStatus> {
-        ptrace::step(self.pid, None)?;
-        Ok(self.wait(None)?)
+    pub fn step(&mut self) -> Result<()> {
+        Ok(ptrace::step(self.pid, None)?)
+    }
+
+    pub fn interrupt(&mut self) -> Result<()> {
+        Ok(ptrace::interrupt(self.pid)?)
+    }
+
+    pub fn cont(&mut self) -> Result<()> {
+        Ok(ptrace::cont(self.pid, None)?)
+    }
+
+    pub fn get_registers(&mut self) -> Result<libc::user_regs_struct> {
+        Ok(ptrace::getregs(self.pid)?)
+    }
+}
+
+pub fn supervise(mut proc: Inferior) -> Result<u64> {
+    // Right now, we collect data and send it to the analyzer.
+    // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
+    let mut iterations = 0;
+    loop {
+        iterations += 1;
+        match proc.wait(None) {
+            Ok(WaitStatus::Stopped(_, sig_num)) => {
+                match sig_num {
+                    Signal::SIGTRAP => {
+                        // Handle trap
+                        debug!("Trapped!");
+                        proc.step()?;
+                    }
+                    
+                    Signal::SIGSEGV => {
+                        return Err(anyhow!("Segmentation fault!"))
+                    }
+                    _ => {
+                        return Err(anyhow!("Signaled: {}", sig_num))
+                    }
+                }
+            },
+
+            Ok(WaitStatus::Exited(pid, exit_status)) => {
+                eprintln!("Process {} exited with status {}!", pid, exit_status);
+                return Ok(iterations);
+            },
+
+            Ok(status) =>  {
+                eprintln!("Received status: {:?}", status);
+                ptrace::cont(proc.pid, None)?;
+            },
+
+            Err(err) => {
+                return Err(err);
+            },
+        }
     }
 }
