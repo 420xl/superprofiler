@@ -3,9 +3,9 @@ use anyhow::anyhow;
 use anyhow::Result;
 use log::{debug, error, info};
 use nix;
+use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::sys::{ptrace};
 use nix::unistd::Pid;
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -81,8 +81,8 @@ impl Inferior {
         let mut vec: Vec<u8> = Vec::with_capacity(words.into());
         for _ in 0..words {
             let value: u64 = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
-            vec.extend(value.to_be_bytes());
-        };
+            vec.extend(value.to_le_bytes());
+        }
         Ok(vec)
     }
 

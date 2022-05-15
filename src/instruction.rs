@@ -15,7 +15,7 @@ impl Instruction {
     pub fn instruction_size(&self) -> usize {
         let bytes: &[u8] = &self.0;
         let mut decoder = iced_x86::Decoder::new(BITNESS, bytes, iced_x86::DecoderOptions::NONE);
-        
+
         let instruction = decoder.decode();
 
         instruction.len()
