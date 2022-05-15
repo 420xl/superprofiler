@@ -21,6 +21,8 @@ impl CodeAnalyzer {
     }
 
     pub fn ingest_execution_state(&mut self, state: &ExecutionState) {
+        let size = state.instruction.instruction_size();
+        info!("Inferred instruction length of {} for {:?}", size, &state.instruction.0.as_slice()[..size]);
         let counter = self.seen_addresses.entry(state.address).or_insert(0);
         *counter += 1;
     }
@@ -33,7 +35,6 @@ impl CodeAnalyzer {
             if utils::offset(preceding.address, following.address) < 0
             {
                 // It's a branch! Add it to the known branching instructions.
-                self.known_branching_instructions.insert(preceding.instruction);
                 self.known_branching_addresses.insert(preceding.address);
                 info!(
                     "Detected branch instruction at {}: {:?} (addr offset: {})",
@@ -41,6 +42,7 @@ impl CodeAnalyzer {
                     preceding.instruction,
                     utils::offset(preceding.address, following.address)
                 );
+                self.known_branching_instructions.insert(preceding.instruction.clone());
             } else {
                 debug!(
                     "Not a branch instruction at {}: {:?}",

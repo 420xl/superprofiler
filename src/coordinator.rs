@@ -5,7 +5,7 @@ use log::{debug, error, info};
 use nix;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::sys::{ptrace, signal};
+use nix::sys::{ptrace};
 use nix::unistd::Pid;
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -77,8 +77,13 @@ impl Inferior {
         Ok(ptrace::getregs(self.pid)?)
     }
 
-    pub fn read_memory(&mut self, addr: u64) -> Result<libc::c_long> {
-        Ok(ptrace::read(self.pid, addr as *mut libc::c_void)?)
+    pub fn read_memory(&mut self, addr: u64, words: u8) -> Result<Vec<u8>> {
+        let mut vec: Vec<u8> = Vec::with_capacity(words.into());
+        for _ in 0..words {
+            let value: u64 = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
+            vec.extend(value.to_be_bytes());
+        };
+        Ok(vec)
     }
 
     pub fn get_execution_state(&mut self) -> Result<ExecutionState> {
@@ -87,7 +92,7 @@ impl Inferior {
         let addr = regs.rip; // TODO: Make platform independent
         Ok(ExecutionState {
             address: addr,
-            instruction: Instruction(self.read_memory(addr)? as u64),
+            instruction: Instruction(self.read_memory(addr, 2)?),
             time: time::SystemTime::now(),
         })
     }
