@@ -1,4 +1,5 @@
 use crate::instruction::Instruction;
+use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::Result;
 use log::{debug, error, info};
@@ -7,12 +8,15 @@ use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time;
 use std::time::SystemTime;
+use nix::sys::personality::{self, Persona};
 
 pub struct ExecutionState {
     pub time: SystemTime,
@@ -20,8 +24,14 @@ pub struct ExecutionState {
     pub instruction: Instruction,
 }
 
+pub struct Breakpoint {
+    pub address: u64,
+    pub old_data: u64,
+}
+
 pub struct Inferior {
     pub pid: Pid, // Will also contain profiling data
+    pub breakpoints: HashMap<u64, Breakpoint>
 }
 
 impl Inferior {
@@ -38,6 +48,7 @@ impl Inferior {
             Command::new(executable)
                 .args(args)
                 .pre_exec(|| {
+                    personality::set(personality::get()? | Persona::ADDR_NO_RANDOMIZE)?;
                     // Adapted from <https://docs.rs/spawn-ptrace/latest/src/spawn_ptrace/lib.rs.html#57>
                     ptrace::traceme().map_err(|e| io::Error::from_raw_os_error(e as i32))
                 })
@@ -45,7 +56,7 @@ impl Inferior {
         };
 
         let pid = Pid::from_raw(child.unwrap().id() as i32);
-        let inferior = Inferior { pid: pid };
+        let inferior = Inferior { pid: pid, breakpoints: HashMap::new() };
 
         Ok(inferior)
     }
@@ -77,6 +88,29 @@ impl Inferior {
         Ok(ptrace::getregs(self.pid)?)
     }
 
+    pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
+        let breakpoint_instruction = 0xCC;
+
+        // Figure out what the old instruction was
+        let old_data = u64::from_le_bytes(self.read_memory(addr, 1)?.try_into().unwrap());
+
+        // Setup the breakpoint in our own system
+        let breakpoint = Breakpoint {
+            address: addr,
+            old_data: old_data,
+        };
+        let new_data = (old_data & 0x00FFFFFF) | breakpoint_instruction;
+        self.breakpoints.insert(addr, breakpoint);
+
+        // Actually set the breakpoint
+        Ok(self.write_memory(addr, new_data.to_le_bytes().into())?)
+    }
+
+    pub fn unset_breakpoint(&mut self, addr: u64) -> Result<()> {
+        let breakpoint = self.breakpoints.get(&addr).context("breakpoint not found")?;
+        Ok(self.write_memory(addr, breakpoint.old_data.to_le_bytes().into())?)
+    }
+
     pub fn read_memory(&mut self, addr: u64, words: u8) -> Result<Vec<u8>> {
         let mut vec: Vec<u8> = Vec::with_capacity(words.into());
         for _ in 0..words {
@@ -84,6 +118,19 @@ impl Inferior {
             vec.extend(value.to_le_bytes());
         }
         Ok(vec)
+    }
+
+    pub fn write_memory(&mut self, addr: u64, data: Vec<u8>) -> Result<()> {
+        for (i, word) in data.chunks(8).enumerate() {
+            unsafe {
+                ptrace::write(
+                    self.pid,
+                    (addr + i as u64) as *mut libc::c_void,
+                    u64::from_le_bytes(word.try_into()?) as *mut libc::c_void,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn get_execution_state(&mut self) -> Result<ExecutionState> {
@@ -98,7 +145,7 @@ impl Inferior {
     }
 }
 
-pub fn supervise(tx: mpsc::Sender<ExecutionState>, mut proc: Inferior) -> Result<u64> {
+pub fn supervise(tx: mpsc::Sender<ExecutionState>, mut proc: Inferior) -> Result<(u64, i32)> {
     // Right now, we collect data and send it to the analyzer.
     // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
     let mut iterations = 0;
@@ -124,7 +171,7 @@ pub fn supervise(tx: mpsc::Sender<ExecutionState>, mut proc: Inferior) -> Result
 
             Ok(WaitStatus::Exited(pid, exit_status)) => {
                 info!("process {} exited with status {}!", pid, exit_status);
-                return Ok(iterations);
+                return Ok((iterations, exit_status));
             }
 
             Ok(status) => {

@@ -39,7 +39,10 @@ fn main() {
     match process {
         Ok(process) => {
             match coordinator::supervise(tx, process) {
-                Ok(steps) => info!("[process completed, {} steps]", steps),
+                Ok((steps, exit_code)) => info!(
+                    "[process completed with exit code {}, {} steps]",
+                    exit_code, steps
+                ),
                 Err(err) => error!("error: {:?}", err),
             };
         }
