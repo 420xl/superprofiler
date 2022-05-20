@@ -21,7 +21,7 @@ impl CodeAnalyzer {
     }
 
     pub fn ingest_execution_state(&mut self, state: &ExecutionState) {
-        let size = state.instruction.instruction_size();
+        let _size = state.instruction.instruction_size();
         let counter = self.seen_addresses.entry(state.address).or_insert(0);
         *counter += 1;
     }

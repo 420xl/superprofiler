@@ -9,7 +9,7 @@ mod utils;
 use std::sync::mpsc::channel;
 use std::thread;
 
-use log::{debug, error, info};
+use log::{error, info};
 
 /// A smart profiler
 #[derive(Parser, Debug)]

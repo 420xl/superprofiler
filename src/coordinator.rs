@@ -9,7 +9,7 @@ use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
-use std::collections::HashSet;
+
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
