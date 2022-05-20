@@ -27,6 +27,7 @@ pub struct ExecutionState {
 pub struct Breakpoint {
     pub address: u64,
     pub old_data: u64,
+    pub enabled: bool
 }
 
 pub struct Inferior {
@@ -35,8 +36,12 @@ pub struct Inferior {
 }
 
 impl Inferior {
-    pub fn from_pid(pid: Pid) -> Result<()> {
-        Ok(ptrace::attach(pid)?)
+    pub fn from_pid(pid: Pid) -> Result<Self> {
+        ptrace::attach(pid)?;
+        
+        Ok(Self {
+            pid: pid, breakpoints: HashMap::new()
+        })
     }
 
     pub fn from_command(command: &str) -> Result<Self> {
@@ -89,8 +94,6 @@ impl Inferior {
     }
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let breakpoint_instruction = 0xCC;
-
         // Figure out what the old instruction was
         let old_data = u64::from_le_bytes(self.read_memory(addr, 1)?.try_into().unwrap());
 
@@ -98,17 +101,35 @@ impl Inferior {
         let breakpoint = Breakpoint {
             address: addr,
             old_data: old_data,
+            enabled: false
         };
-        let new_data = (old_data & 0x00FFFFFF) | breakpoint_instruction;
         self.breakpoints.insert(addr, breakpoint);
 
         // Actually set the breakpoint
-        Ok(self.write_memory(addr, new_data.to_le_bytes().into())?)
+        self.enable_breakpoint(addr)
     }
 
-    pub fn unset_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let breakpoint = self.breakpoints.get(&addr).context("breakpoint not found")?;
-        Ok(self.write_memory(addr, breakpoint.old_data.to_le_bytes().into())?)
+    pub fn has_breakpoint(&self, addr: u64) -> bool {
+        self.breakpoints.contains_key(&addr)
+    }
+
+    pub fn disable_breakpoint(&mut self, addr: u64) -> Result<()> {
+        let breakpoint = self.breakpoints.get_mut(&addr).context("breakpoint not found")?;
+        let to_write: Vec<u8> = breakpoint.old_data.to_le_bytes().into();
+        breakpoint.enabled = false;
+        self.write_memory(addr, to_write)?;
+        Ok(())
+    }
+
+    pub fn enable_breakpoint(&mut self, addr: u64) -> Result<()> {
+        let breakpoint_instruction = 0xCC;
+
+        let breakpoint = self.breakpoints.get_mut(&addr).context("breakpoint not found")?;
+        let new_data = (breakpoint.old_data & 0x00FFFFFF) | breakpoint_instruction;
+        breakpoint.enabled = true;
+        self.write_memory(addr, new_data.to_le_bytes().into())?;
+
+        Ok(())
     }
 
     pub fn read_memory(&mut self, addr: u64, words: u8) -> Result<Vec<u8>> {
