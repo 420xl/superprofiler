@@ -18,6 +18,7 @@ use std::time;
 use std::time::SystemTime;
 use nix::sys::personality::{self, Persona};
 
+#[derive(Clone, Debug)]
 pub struct ExecutionState {
     pub time: SystemTime,
     pub address: u64,
@@ -35,10 +36,14 @@ pub struct Inferior {
     pub breakpoints: HashMap<u64, Breakpoint>
 }
 
+pub enum SupervisorCommand {
+    SetBreakpoint(u64)
+}
+
 impl Inferior {
     pub fn from_pid(pid: Pid) -> Result<Self> {
         ptrace::attach(pid)?;
-        
+
         Ok(Self {
             pid: pid, breakpoints: HashMap::new()
         })
@@ -94,6 +99,8 @@ impl Inferior {
     }
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
+        debug!("Setting breakpoint at {}...", addr);
+
         // Figure out what the old instruction was
         let old_data = u64::from_le_bytes(self.read_memory(addr, 1)?.try_into().unwrap());
 
@@ -125,7 +132,7 @@ impl Inferior {
         let breakpoint_instruction = 0xCC;
 
         let breakpoint = self.breakpoints.get_mut(&addr).context("breakpoint not found")?;
-        let new_data = (breakpoint.old_data & 0x00FFFFFF) | breakpoint_instruction;
+        let new_data = (breakpoint.old_data & (u64::MAX ^ 0xFF)) | breakpoint_instruction;
         breakpoint.enabled = true;
         self.write_memory(addr, new_data.to_le_bytes().into())?;
 
@@ -160,17 +167,33 @@ impl Inferior {
         let addr = regs.rip; // TODO: Make platform independent
         Ok(ExecutionState {
             address: addr,
-            instruction: Instruction(self.read_memory(addr, 2)?),
+            instruction: Instruction::from_data(self.read_memory(addr, 2)?),
             time: time::SystemTime::now(),
         })
     }
+
+    pub fn execute_command(&mut self, command: SupervisorCommand) -> Result<()> {
+        match command {
+            SupervisorCommand::SetBreakpoint(addr) => self.set_breakpoint(addr)
+        }
+    }
 }
 
-pub fn supervise(tx: mpsc::Sender<ExecutionState>, mut proc: Inferior) -> Result<(u64, i32)> {
+pub fn supervise(tx: mpsc::Sender<ExecutionState>, rx: mpsc::Receiver<SupervisorCommand>, mut proc: Inferior) -> Result<(u64, i32)> {
     // Right now, we collect data and send it to the analyzer.
     // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
     let mut iterations = 0;
     loop {
+        loop {
+            match rx.try_recv() {
+                Ok(cmd) => match proc.execute_command(cmd) {
+                    Ok(_) => {},
+                    Err(err) => error!("error: {}", err.to_string())
+                },
+                Err(_) => break // No commands to run
+            }
+        }
+
         iterations += 1;
         match proc.wait(None) {
             Ok(WaitStatus::Stopped(_, sig_num)) => {
@@ -179,7 +202,10 @@ pub fn supervise(tx: mpsc::Sender<ExecutionState>, mut proc: Inferior) -> Result
                         // Handle trap
                         debug!("Trapped!");
                         match proc.get_execution_state() {
-                            Ok(state) => tx.send(state).expect("Could not send execution state!"),
+                            Ok(state) => {
+                                tx.send(state.clone()).expect("Could not send execution state!");
+                                info!("    breakpoint at {}: {}", state.address, proc.has_breakpoint(state.address));
+                            },
                             Err(err) => error!("Unable to send execution state: {:?}", err),
                         }
                         proc.step()?;

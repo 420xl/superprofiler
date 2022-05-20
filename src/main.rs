@@ -30,15 +30,16 @@ fn main() {
     let process = coordinator::Inferior::from_command(&command);
 
     info!("Starting...");
-    let (tx, rx) = channel::<coordinator::ExecutionState>();
+    let (state_tx, state_rx) = channel::<coordinator::ExecutionState>();
+    let (cmd_tx, cmd_rx) = channel::<coordinator::SupervisorCommand>();
 
     let analyzer_thread = thread::spawn(|| {
-        analyzer::analyze(rx);
+        analyzer::analyze(state_rx, cmd_tx);
     });
 
     match process {
         Ok(process) => {
-            match coordinator::supervise(tx, process) {
+            match coordinator::supervise(state_tx, cmd_rx, process) {
                 Ok((steps, exit_code)) => info!(
                     "[process completed with exit code {}, {} steps]",
                     exit_code, steps
