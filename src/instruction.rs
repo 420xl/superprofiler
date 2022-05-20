@@ -1,5 +1,5 @@
-use std::fmt;
 use crate::utils;
+use std::fmt;
 
 static BITNESS: u32 = 64;
 
@@ -7,7 +7,7 @@ static BITNESS: u32 = 64;
 pub struct Instruction {
     pub data: Vec<u8>,
     pub disassembly: Option<String>,
-    pub length: usize
+    pub length: usize,
 }
 
 #[cfg(target_arch = "arm")]
@@ -42,7 +42,7 @@ impl fmt::Display for Instruction {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match &self.disassembly {
             Some(disassembly) => fmt.write_str(&disassembly)?,
-            None => fmt.write_str(&utils::encode_hex(&self.data))?
+            None => fmt.write_str(&utils::encode_hex(&self.data))?,
         }
         Ok(())
     }

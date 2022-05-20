@@ -1,18 +1,18 @@
-use crate::coordinator::{ExecutionState, SupervisorCommand, self};
+use crate::coordinator::{self, ExecutionState, SupervisorCommand};
 use crate::instruction::Instruction;
 use crate::utils;
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use log::{debug, info};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
-use anyhow::Context;
-use anyhow::anyhow;
-use anyhow::Result;
 
 pub struct CodeAnalyzer {
     known_branching_instructions: HashSet<Instruction>,
     known_branching_addresses: HashSet<u64>,
     seen_addresses: HashMap<u64, u64>,
-    cmd_tx: mpsc::Sender<SupervisorCommand>
+    cmd_tx: mpsc::Sender<SupervisorCommand>,
 }
 
 impl CodeAnalyzer {
@@ -21,7 +21,7 @@ impl CodeAnalyzer {
             known_branching_instructions: HashSet::new(),
             known_branching_addresses: HashSet::new(),
             seen_addresses: HashMap::new(),
-            cmd_tx: cmd_tx
+            cmd_tx: cmd_tx,
         }
     }
 
@@ -49,7 +49,8 @@ impl CodeAnalyzer {
                     .insert(preceding.instruction.clone());
 
                 // Set a breakpoint at the jump
-                self.cmd_tx.send(SupervisorCommand::SetBreakpoint(preceding.address))?;
+                self.cmd_tx
+                    .send(SupervisorCommand::SetBreakpoint(preceding.address))?;
             } else {
                 debug!(
                     "Not a branch instruction at {}: {}",
@@ -57,12 +58,15 @@ impl CodeAnalyzer {
                 );
             }
         }
-        
+
         Ok(())
     }
 }
 
-pub fn analyze(state_rx: mpsc::Receiver<ExecutionState>, cmd_tx: mpsc::Sender<coordinator::SupervisorCommand>) {
+pub fn analyze(
+    state_rx: mpsc::Receiver<ExecutionState>,
+    cmd_tx: mpsc::Sender<coordinator::SupervisorCommand>,
+) {
     let mut analyzer = CodeAnalyzer::new(cmd_tx);
     let mut state_buffer: Vec<ExecutionState> = Vec::new();
     loop {
