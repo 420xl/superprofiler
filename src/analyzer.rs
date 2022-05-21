@@ -38,7 +38,7 @@ impl CodeAnalyzer {
             if preceding.address + size as u64 != following.address {
                 // It's a branch! Add it to the known branching instructions.
                 self.known_branching_addresses.insert(preceding.address);
-                info!(
+                debug!(
                     "Detected branch instruction at {}: {} (addr offset: {}, expected: {})",
                     preceding.address,
                     preceding.instruction,

@@ -1,5 +1,6 @@
 use crate::utils;
 use std::fmt;
+use iced_x86::Formatter;
 
 static BITNESS: u32 = 64;
 
@@ -22,16 +23,16 @@ fn disassemble_instruction(bytes: &[u8]) -> (usize, String) {
     let mut decoder = iced_x86::Decoder::new(BITNESS, bytes, iced_x86::DecoderOptions::NONE);
     let instruction = decoder.decode();
     let mut output: String = String::new();
-    let mut formatter = iced_x86::FastFormatter::new();
+    let mut formatter = iced_x86::IntelFormatter::new();
     formatter.format(&instruction, &mut output);
     (instruction.len(), output)
 }
 
 impl Instruction {
-    pub fn from_data(data: Vec<u8>) -> Self {
-        let (length, disassembly) = disassemble_instruction(data.as_slice());
+    pub fn from_data(data: &[u8]) -> Self {
+        let (length, disassembly) = disassemble_instruction(data);
         Self {
-            data: data,
+            data: data[..length].into(),
             disassembly: Some(disassembly),
             length: length,
         }
@@ -40,9 +41,11 @@ impl Instruction {
 
 impl fmt::Display for Instruction {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match &self.disassembly {
-            Some(disassembly) => fmt.write_str(&disassembly)?,
-            None => fmt.write_str(&utils::encode_hex(&self.data))?,
+        fmt.write_str(&utils::encode_hex(&self.data))?;
+        if let Some(disassembly) = &self.disassembly {
+            fmt.write_str(" (");
+            fmt.write_str(&disassembly)?;
+            fmt.write_str(")");
         }
         Ok(())
     }

@@ -1,4 +1,5 @@
 use crate::instruction::Instruction;
+use crate::utils;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
@@ -9,7 +10,7 @@ use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
-
+use std::fmt;
 use nix::sys::personality::{self, Persona};
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -23,6 +24,13 @@ pub struct ExecutionState {
     pub time: SystemTime,
     pub address: u64,
     pub instruction: Instruction,
+}
+
+impl fmt::Display for ExecutionState {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "{:#x}: {}", self.address, self.instruction)?;
+        Ok(())
+    }
 }
 
 pub struct Breakpoint {
@@ -103,25 +111,35 @@ impl Inferior {
     }
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
-        debug!("Setting breakpoint at {}...", addr);
-
-        // Figure out what the old instruction was
-        let old_data = u64::from_le_bytes(self.read_memory(addr, 1)?.try_into().unwrap());
-
-        // Setup the breakpoint in our own system
-        let breakpoint = Breakpoint {
-            address: addr,
-            old_data: old_data,
-            enabled: false,
-        };
-        self.breakpoints.insert(addr, breakpoint);
+        if !self.has_breakpoint(addr) {
+            debug!("Setting breakpoint at {:#x}...", addr);
+    
+            // Setup the breakpoint in our own system
+            let breakpoint = Breakpoint {
+                address: addr,
+                old_data: self.read_byte(addr)? as u64,
+                enabled: false,
+            };
+            self.breakpoints.insert(addr, breakpoint);
+        } else {
+            debug!("Breakpoint already set at {}!", addr);
+        }
 
         // Actually set the breakpoint
-        self.enable_breakpoint(addr)
+        self.enable_breakpoint(addr)?;
+
+        Ok(())
     }
 
     pub fn has_breakpoint(&self, addr: u64) -> bool {
         self.breakpoints.contains_key(&addr)
+    }
+
+    pub fn has_breakpoint_enabled(&self, addr: u64) -> bool {
+        match self.breakpoints.get(&addr) {
+            Some(val) => val.enabled,
+            None => false
+        }
     }
 
     pub fn disable_breakpoint(&mut self, addr: u64) -> Result<()> {
@@ -129,9 +147,10 @@ impl Inferior {
             .breakpoints
             .get_mut(&addr)
             .context("breakpoint not found")?;
-        let to_write: Vec<u8> = breakpoint.old_data.to_le_bytes().into();
         breakpoint.enabled = false;
-        self.write_memory(addr, to_write)?;
+        let to_write = breakpoint.old_data as u8;
+        debug!("Disabling breakpoint at {}; old data: {}", addr, to_write);
+        self.write_byte(addr, to_write)?;
         Ok(())
     }
 
@@ -142,9 +161,9 @@ impl Inferior {
             .breakpoints
             .get_mut(&addr)
             .context("breakpoint not found")?;
-        let new_data = (breakpoint.old_data & (u64::MAX ^ 0xFF)) | breakpoint_instruction;
         breakpoint.enabled = true;
-        self.write_memory(addr, new_data.to_le_bytes().into())?;
+        debug!("Enabling breakpoint at {}; old data: {}", addr, breakpoint.old_data);
+        self.write_byte(addr, breakpoint_instruction)?;
 
         Ok(())
     }
@@ -158,16 +177,38 @@ impl Inferior {
         Ok(vec)
     }
 
-    pub fn write_memory(&mut self, addr: u64, data: Vec<u8>) -> Result<()> {
-        for (i, word) in data.chunks(8).enumerate() {
-            unsafe {
-                ptrace::write(
-                    self.pid,
-                    (addr + i as u64) as *mut libc::c_void,
-                    u64::from_le_bytes(word.try_into()?) as *mut libc::c_void,
-                )?;
-            }
+    // The following function is adapted from <https://reberhardt.com/cs110l/spring-2020/assignments/project-1/>
+    fn write_byte(&mut self, addr: u64, val: u8) -> Result<u8> {
+        let aligned_addr = utils::align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid, aligned_addr as ptrace::AddressType)? as u64;
+        let orig_byte: u8 = ((word >> 8 * byte_offset) & 0xff) as u8;
+        let masked_word = word & !(0xff << 8 * byte_offset);
+        let updated_word = masked_word | ((val as u64) << 8 * byte_offset);
+        unsafe {
+            ptrace::write(
+                self.pid,
+                aligned_addr as ptrace::AddressType,
+                updated_word as *mut libc::c_void,
+            )?;
         }
+        Ok(orig_byte)
+    }
+
+    fn read_byte(&mut self, addr: u64) -> Result<u8> {
+        let aligned_addr = utils::align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid, aligned_addr as ptrace::AddressType)? as u64;
+        let orig_byte: u8 = ((word >> 8 * byte_offset) & 0xff) as u8;
+        Ok(orig_byte)
+    }
+
+    pub fn set_instruction_pointer(&mut self, addr: u64) -> Result<()> {
+        let mut regs = ptrace::getregs(self.pid)?;
+        debug!("Setting rip; prev = {}, new = {}", regs.rip, addr);
+        regs.rip = addr;
+        ptrace::setregs(self.pid, regs)?;
+
         Ok(())
     }
 
@@ -177,7 +218,7 @@ impl Inferior {
         let addr = regs.rip; // TODO: Make platform independent
         Ok(ExecutionState {
             address: addr,
-            instruction: Instruction::from_data(self.read_memory(addr, 2)?),
+            instruction: Instruction::from_data(self.read_memory(addr, 2)?.as_slice()),
             time: time::SystemTime::now(),
         })
     }
@@ -197,41 +238,60 @@ pub fn supervise(
     // Right now, we collect data and send it to the analyzer.
     // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
     let mut iterations = 0;
+    let mut temp_disabled_breakpoints: Vec<u64> = Vec::new(); // Keeps track of breakpoints temporarily disabled because we're stepping
     loop {
-        loop {
-            match rx.try_recv() {
-                Ok(cmd) => match proc.execute_command(cmd) {
-                    Ok(_) => {}
-                    Err(err) => error!("error: {}", err.to_string()),
-                },
-                Err(_) => break, // No commands to run
-            }
-        }
-
         iterations += 1;
         match proc.wait(None) {
             Ok(WaitStatus::Stopped(_, sig_num)) => {
                 match sig_num {
                     Signal::SIGTRAP => {
+                        // Re-enable temporarily disabled breakpoints
+                        while !temp_disabled_breakpoints.is_empty() {
+                            let bp = temp_disabled_breakpoints.pop().unwrap();
+                            proc.enable_breakpoint(bp).expect("Unable to re-enable temporarily disabled breakpoint!");
+                            debug!("Re-enabled breakpoint!");
+                        }
+                
+                        // Execute necessary commands
+                        loop {
+                            match rx.try_recv() {
+                                Ok(cmd) => match proc.execute_command(cmd) {
+                                    Ok(_) => {}
+                                    Err(err) => error!("error: {}", err.to_string()),
+                                },
+                                Err(_) => break, // No commands to run
+                            }
+                        }
+
                         // Handle trap
                         debug!("Trapped!");
                         match proc.get_execution_state() {
                             Ok(state) => {
-                                tx.send(state.clone())
-                                    .expect("Could not send execution state!");
-                                info!(
-                                    "    breakpoint at {}: {}",
-                                    state.address,
-                                    proc.has_breakpoint(state.address)
-                                );
+                                if proc.has_breakpoint_enabled(state.address - 1) {
+                                    let bp_addr = state.address - 1;
+                                    info!("[{}] Hit breakpoint at {}", iterations, state);
+
+                                    proc.disable_breakpoint(bp_addr).expect("Could not disable breakpoint");
+                                    proc.set_instruction_pointer(bp_addr).expect("Could not rewind instruction pointer");
+                                    temp_disabled_breakpoints.push(bp_addr); // We will re-enable post single stepping
+                                } else {
+                                    tx.send(state.clone())
+                                        .expect("Could not send execution state!");
+                                }
+                                proc.step()?;
                             }
-                            Err(err) => error!("Unable to send execution state: {:?}", err),
+                            Err(err) => error!("Unable to get execution state: {:?}", err),
                         }
-                        proc.step()?;
                     }
 
-                    Signal::SIGSEGV => return Err(anyhow!("Segmentation fault!")),
-                    _ => return Err(anyhow!("Signaled: {}", sig_num)),
+                    Signal::SIGSEGV => {
+                        let state = proc.get_execution_state()?;
+                        error!("Hit segmentation fault at {}. Breakpoint = {}", state, proc.has_breakpoint(state.address - 1));
+                        return Err(anyhow!("[{}] Segmentation fault!", iterations))
+                    },
+                    _ => {
+                        info!("Signaled: {}", sig_num);
+                    }
                 }
             }
 
