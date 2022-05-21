@@ -5,19 +5,22 @@ use anyhow::Context;
 use anyhow::Result;
 use log::{debug, error, info};
 use nix;
+use nix::sys::personality::{self, Persona};
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::fmt;
-use nix::sys::personality::{self, Persona};
 use std::io;
 use std::os::unix::process::CommandExt;
+use std::process::Child;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time;
+use std::time::Duration;
 use std::time::SystemTime;
+use wait_timeout::ChildExt;
 
 #[derive(Clone, Debug)]
 pub struct ExecutionState {
@@ -112,8 +115,9 @@ impl Inferior {
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
         if !self.has_breakpoint(addr) {
-            debug!("Setting breakpoint at {:#x}...", addr);
-    
+            let instruction = Instruction::from_data(self.read_memory(addr, 2)?.as_slice());
+            info!("Setting breakpoint at {}", instruction);
+
             // Setup the breakpoint in our own system
             let breakpoint = Breakpoint {
                 address: addr,
@@ -138,7 +142,7 @@ impl Inferior {
     pub fn has_breakpoint_enabled(&self, addr: u64) -> bool {
         match self.breakpoints.get(&addr) {
             Some(val) => val.enabled,
-            None => false
+            None => false,
         }
     }
 
@@ -162,7 +166,10 @@ impl Inferior {
             .get_mut(&addr)
             .context("breakpoint not found")?;
         breakpoint.enabled = true;
-        debug!("Enabling breakpoint at {}; old data: {}", addr, breakpoint.old_data);
+        debug!(
+            "Enabling breakpoint at {}; old data: {}",
+            addr, breakpoint.old_data
+        );
         self.write_byte(addr, breakpoint_instruction)?;
 
         Ok(())
@@ -248,10 +255,11 @@ pub fn supervise(
                         // Re-enable temporarily disabled breakpoints
                         while !temp_disabled_breakpoints.is_empty() {
                             let bp = temp_disabled_breakpoints.pop().unwrap();
-                            proc.enable_breakpoint(bp).expect("Unable to re-enable temporarily disabled breakpoint!");
+                            proc.enable_breakpoint(bp)
+                                .expect("Unable to re-enable temporarily disabled breakpoint!");
                             debug!("Re-enabled breakpoint!");
                         }
-                
+
                         // Execute necessary commands
                         loop {
                             match rx.try_recv() {
@@ -267,12 +275,15 @@ pub fn supervise(
                         debug!("Trapped!");
                         match proc.get_execution_state() {
                             Ok(state) => {
-                                if proc.has_breakpoint_enabled(state.address - 1) {
-                                    let bp_addr = state.address - 1;
-                                    info!("[{}] Hit breakpoint at {}", iterations, state);
+                                debug!("[{}] Trapped at {}", iterations, state);
+                                if proc.has_breakpoint_enabled(state.address) {
+                                    let bp_addr = state.address;
+                                    debug!("[{}] Hit breakpoint at {}", iterations, state);
 
-                                    proc.disable_breakpoint(bp_addr).expect("Could not disable breakpoint");
-                                    proc.set_instruction_pointer(bp_addr).expect("Could not rewind instruction pointer");
+                                    proc.disable_breakpoint(bp_addr)
+                                        .expect("Could not disable breakpoint");
+                                    proc.set_instruction_pointer(bp_addr)
+                                        .expect("Could not rewind instruction pointer");
                                     temp_disabled_breakpoints.push(bp_addr); // We will re-enable post single stepping
                                 } else {
                                     tx.send(state.clone())
@@ -286,17 +297,28 @@ pub fn supervise(
 
                     Signal::SIGSEGV => {
                         let state = proc.get_execution_state()?;
-                        error!("Hit segmentation fault at {}. Breakpoint = {}", state, proc.has_breakpoint(state.address - 1));
-                        return Err(anyhow!("[{}] Segmentation fault!", iterations))
-                    },
+                        error!(
+                            "[{}] Hit segmentation fault at {} [breakpoint = {}]",
+                            iterations,
+                            state,
+                            proc.has_breakpoint(state.address - 1)
+                        );
+                        return Err(anyhow!("Segmentation fault!"));
+                    }
                     _ => {
                         info!("Signaled: {}", sig_num);
+                        proc.step()?;
                     }
                 }
             }
 
             Ok(WaitStatus::Exited(pid, exit_status)) => {
-                info!("process {} exited with status {}!", pid, exit_status);
+                info!(
+                    "process {} exited with status {}, set {} breakpoints",
+                    pid,
+                    exit_status,
+                    proc.breakpoints.len()
+                );
                 return Ok((iterations, exit_status));
             }
 

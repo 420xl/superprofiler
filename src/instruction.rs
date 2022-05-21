@@ -1,6 +1,6 @@
 use crate::utils;
-use std::fmt;
 use iced_x86::Formatter;
+use std::fmt;
 
 static BITNESS: u32 = 64;
 

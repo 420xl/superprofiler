@@ -20,7 +20,6 @@ pub fn encode_hex(bytes: &[u8]) -> String {
     s
 }
 
-
 // From https://reberhardt.com/cs110l/spring-2020/assignments/project-1/
 pub fn align_addr_to_word(addr: u64) -> u64 {
     addr & (-(size_of::<u64>() as isize) as u64)
