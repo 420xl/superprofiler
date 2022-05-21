@@ -69,15 +69,18 @@ pub fn analyze(
 ) {
     let mut analyzer = CodeAnalyzer::new(cmd_tx);
     let mut state_buffer: Vec<ExecutionState> = Vec::new();
+    let mut exploration_state_id: usize = 0;
     loop {
         match state_rx.recv() {
             Ok(state) => {
                 analyzer.ingest_execution_state(&state);
-                state_buffer.push(state);
-
-                if state_buffer.len() > 200 {
-                    analyzer.ingest_single_step_sequence(state_buffer);
-                    state_buffer = Vec::new();
+                if let Some(id) = state.exploration_step_id {
+                    if id != exploration_state_id {
+                        analyzer.ingest_single_step_sequence(state_buffer);
+                        state_buffer = Vec::new();
+                        exploration_state_id = id;
+                    }
+                    state_buffer.push(state);
                 }
             }
             Err(_) => {

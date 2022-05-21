@@ -7,7 +7,7 @@ use log::{debug, error, info};
 use nix;
 use nix::sys::personality::{self, Persona};
 use nix::sys::ptrace;
-use nix::sys::signal::Signal;
+use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -17,6 +17,8 @@ use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
 use std::sync::mpsc;
+use std::sync::Mutex;
+use std::thread;
 use std::time;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -27,6 +29,7 @@ pub struct ExecutionState {
     pub time: SystemTime,
     pub address: u64,
     pub instruction: Instruction,
+    pub exploration_step_id: Option<usize>,
 }
 
 impl fmt::Display for ExecutionState {
@@ -219,7 +222,10 @@ impl Inferior {
         Ok(())
     }
 
-    pub fn get_execution_state(&mut self) -> Result<ExecutionState> {
+    pub fn get_execution_state(
+        &mut self,
+        exploration_step_id: Option<usize>,
+    ) -> Result<ExecutionState> {
         let regs = self.get_registers()?;
 
         let addr = regs.rip; // TODO: Make platform independent
@@ -227,6 +233,7 @@ impl Inferior {
             address: addr,
             instruction: Instruction::from_data(self.read_memory(addr, 2)?.as_slice()),
             time: time::SystemTime::now(),
+            exploration_step_id,
         })
     }
 
@@ -246,6 +253,21 @@ pub fn supervise(
     // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
     let mut iterations = 0;
     let mut temp_disabled_breakpoints: Vec<u64> = Vec::new(); // Keeps track of breakpoints temporarily disabled because we're stepping
+
+    let tracee_pid = proc.pid;
+    let alarm_thread = thread::spawn(move || {
+        // This will send a SIGTRAP to the tracee periodically
+        loop {
+            match signal::kill(tracee_pid, Signal::SIGTRAP) {
+                Ok(_) => debug!("sent SIGTRAP to pid {}", tracee_pid),
+                Err(_) => break, // Process must be gone
+            };
+            thread::sleep(Duration::from_micros(100));
+        }
+    });
+
+    let mut exploration_single_steps: i32 = 0;
+    let mut exploration_step_id: usize = 0;
     loop {
         iterations += 1;
         match proc.wait(None) {
@@ -273,11 +295,11 @@ pub fn supervise(
 
                         // Handle trap
                         debug!("Trapped!");
-                        match proc.get_execution_state() {
+                        match proc.get_execution_state(Some(exploration_step_id)) {
                             Ok(state) => {
                                 debug!("[{}] Trapped at {}", iterations, state);
-                                if proc.has_breakpoint_enabled(state.address) {
-                                    let bp_addr = state.address;
+                                if proc.has_breakpoint_enabled(state.address - 1) {
+                                    let bp_addr = state.address - 1;
                                     debug!("[{}] Hit breakpoint at {}", iterations, state);
 
                                     proc.disable_breakpoint(bp_addr)
@@ -285,18 +307,29 @@ pub fn supervise(
                                     proc.set_instruction_pointer(bp_addr)
                                         .expect("Could not rewind instruction pointer");
                                     temp_disabled_breakpoints.push(bp_addr); // We will re-enable post single stepping
+                                    proc.step()?;
                                 } else {
                                     tx.send(state.clone())
                                         .expect("Could not send execution state!");
+
+                                    // If there have been fewer than 250 single steps (TODO: make this configurable),
+                                    // then that means we are still in "exploration mode" — looking for jumps.
+                                    if exploration_single_steps < 250 {
+                                        exploration_single_steps += 1;
+                                        proc.step()?;
+                                    } else {
+                                        exploration_single_steps = 0;
+                                        exploration_step_id += 1;
+                                        proc.cont()?;
+                                    }
                                 }
-                                proc.step()?;
                             }
                             Err(err) => error!("Unable to get execution state: {:?}", err),
                         }
                     }
 
                     Signal::SIGSEGV => {
-                        let state = proc.get_execution_state()?;
+                        let state = proc.get_execution_state(Some(exploration_step_id))?;
                         error!(
                             "[{}] Hit segmentation fault at {} [breakpoint = {}]",
                             iterations,
@@ -323,7 +356,7 @@ pub fn supervise(
             }
 
             Ok(status) => {
-                info!("peceived status: {:?}", status);
+                info!("Received status: {:?}", status);
                 ptrace::cont(proc.pid, None)?;
             }
 
