@@ -1,8 +1,6 @@
 use crate::coordinator::{self, ExecutionState, SupervisorCommand};
 use crate::instruction::Instruction;
 use crate::utils;
-use anyhow::anyhow;
-use anyhow::Context;
 use anyhow::Result;
 use log::{debug, info};
 use std::collections::{HashMap, HashSet};
@@ -38,10 +36,11 @@ impl CodeAnalyzer {
             if preceding.address + size as u64 != following.address
                 && preceding.address != following.address
                 && !preceding.instruction.is_breakpoint()
+                && !self.known_branching_addresses.contains(&preceding.address)
             {
                 // It's a branch! Add it to the known branching instructions.
                 self.known_branching_addresses.insert(preceding.address);
-                info!(
+                debug!(
                     "Detected branch instruction at {:#x}: {} (addr offset: {}, expected: {})",
                     preceding.address,
                     preceding.instruction,
@@ -79,7 +78,9 @@ pub fn analyze(
                 analyzer.ingest_execution_state(&state);
                 if let Some(id) = state.exploration_step_id {
                     if id != exploration_state_id {
-                        analyzer.ingest_single_step_sequence(state_buffer);
+                        analyzer
+                            .ingest_single_step_sequence(state_buffer)
+                            .expect("Unable to ingest sequence buffer!");
                         state_buffer = Vec::new();
                         exploration_state_id = id;
                     }

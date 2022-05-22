@@ -47,9 +47,9 @@ impl fmt::Display for Instruction {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.write_str(&utils::encode_hex(&self.data))?;
         if let Some(disassembly) = &self.disassembly {
-            fmt.write_str(" (");
+            fmt.write_str(" (")?;
             fmt.write_str(&disassembly)?;
-            fmt.write_str(")");
+            fmt.write_str(")")?;
         }
         Ok(())
     }

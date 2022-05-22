@@ -24,3 +24,20 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 pub fn align_addr_to_word(addr: u64) -> u64 {
     addr & (-(size_of::<u64>() as isize) as u64)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::utils::align_addr_to_word;
+
+    #[test]
+    fn test_align_addr_to_word() {
+        assert_eq!(align_addr_to_word(123457), 123456);
+        assert_eq!(align_addr_to_word(123458), 123456);
+        assert_eq!(align_addr_to_word(123459), 123456);
+        assert_eq!(align_addr_to_word(123460), 123456);
+        assert_eq!(align_addr_to_word(123461), 123456);
+        assert_eq!(align_addr_to_word(123462), 123456);
+        assert_eq!(align_addr_to_word(123463), 123456);
+        assert_eq!(align_addr_to_word(123464), 123464);
+    }
+}

@@ -10,20 +10,20 @@ use nix::sys::ptrace;
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use proc_maps::get_process_maps;
+use proc_maps::MapRange;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::os::unix::process::CommandExt;
-use std::process::Child;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Condvar;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time;
 use std::time::Duration;
 use std::time::SystemTime;
-use wait_timeout::ChildExt;
 
 #[derive(Clone, Debug)]
 pub struct ExecutionState {
@@ -49,6 +49,8 @@ pub struct Breakpoint {
 pub struct Inferior {
     pub pid: Pid, // Will also contain profiling data
     pub breakpoints: HashMap<u64, Breakpoint>,
+    pub seen_addresses: HashSet<u64>,
+    proc_map: Option<Vec<MapRange>>,
 }
 
 pub enum SupervisorCommand {
@@ -56,12 +58,15 @@ pub enum SupervisorCommand {
 }
 
 impl Inferior {
+    #[allow(dead_code)]
     pub fn from_pid(pid: Pid) -> Result<Self> {
         ptrace::attach(pid)?;
 
         Ok(Self {
             pid: pid,
             breakpoints: HashMap::new(),
+            seen_addresses: HashSet::new(),
+            proc_map: None,
         })
     }
 
@@ -74,7 +79,7 @@ impl Inferior {
             Command::new(executable)
                 .args(args)
                 .pre_exec(|| {
-                    personality::set(personality::get()? | Persona::ADDR_NO_RANDOMIZE)?;
+                    // personality::set(personality::get()? | Persona::ADDR_NO_RANDOMIZE)?;
                     // Adapted from <https://docs.rs/spawn-ptrace/latest/src/spawn_ptrace/lib.rs.html#57>
                     ptrace::traceme().map_err(|e| io::Error::from_raw_os_error(e as i32))
                 })
@@ -85,9 +90,46 @@ impl Inferior {
         let inferior = Inferior {
             pid: pid,
             breakpoints: HashMap::new(),
+            seen_addresses: HashSet::new(),
+            proc_map: None,
         };
 
         Ok(inferior)
+    }
+
+    pub fn refresh_proc_map(&mut self) -> Result<()> {
+        let maps = get_process_maps(self.pid.as_raw())?;
+        self.proc_map = Some(maps);
+
+        Ok(())
+    }
+
+    pub fn addr_map(&self, addr: u64) -> Option<&MapRange> {
+        if let Some(maps) = &self.proc_map {
+            if let Some(val) = maps.iter().find(|map| {
+                let start = map.start() as u64;
+                (addr >= start) && (addr < (start + map.size() as u64))
+            }) {
+                return Some(val);
+            }
+        }
+        None
+    }
+
+    pub fn addr_filename(&self, addr: u64) -> String {
+        if let Some(map) = self.addr_map(addr) {
+            if let Some(path) = map.filename() {
+                return path.to_string_lossy().to_string();
+            }
+        }
+        return "<unknown>".into();
+    }
+
+    pub fn addr_is_executable(&self, addr: u64) -> Option<bool> {
+        if let Some(map) = self.addr_map(addr) {
+            return Some(map.is_exec());
+        }
+        return None;
     }
 
     /// Calls waitpid on this inferior and returns a Status to indicate the state of the process
@@ -96,8 +138,9 @@ impl Inferior {
         Ok(waitpid(self.pid, options)?)
     }
 
+    #[allow(dead_code)]
     pub fn kill(&mut self) -> Result<()> {
-        info!("killing running inferior (pid {})", self.pid);
+        info!("Killing running inferior (pid {})", self.pid);
         Ok(ptrace::kill(self.pid)?)
     }
 
@@ -105,6 +148,7 @@ impl Inferior {
         Ok(ptrace::step(self.pid, None)?)
     }
 
+    #[allow(dead_code)]
     pub fn interrupt(&mut self) -> Result<()> {
         Ok(ptrace::interrupt(self.pid)?)
     }
@@ -118,9 +162,31 @@ impl Inferior {
     }
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
+        if let Some(val) = self.addr_is_executable(addr) {
+            if !val {
+                error!("Trying to write to non-executable location: {:#x}", addr);
+            } else {
+                debug!(
+                    "Setting breakpoint at known executable address: {:#x}",
+                    addr
+                );
+            }
+        }
+        let source_filename = self.addr_filename(addr);
+        if source_filename.contains(".so") || source_filename == "[vdso]" {
+            debug!(
+                "Skipping setting breakpoint in shared object {}",
+                source_filename
+            );
+            return Ok(());
+        }
         if !self.has_breakpoint(addr) {
             let instruction = Instruction::from_data(self.read_memory(addr, 2)?.as_slice());
-            info!("Setting breakpoint at {}", instruction);
+            info!(
+                "Setting breakpoint at {} (file: {})",
+                instruction,
+                self.addr_filename(addr)
+            );
 
             // Setup the breakpoint in our own system
             let breakpoint = Breakpoint {
@@ -150,6 +216,7 @@ impl Inferior {
         }
     }
 
+    #[allow(dead_code)]
     pub fn has_breakpoint_disabled(&self, addr: u64) -> bool {
         match self.breakpoints.get(&addr) {
             Some(val) => !val.enabled,
@@ -184,7 +251,16 @@ impl Inferior {
             "Enabling breakpoint at {}; old data: {}",
             addr, breakpoint.old_data
         );
-        self.write_byte(addr, breakpoint_instruction)?;
+        let old_val = breakpoint.old_data as u8;
+        let new_val = self.write_byte(addr, breakpoint_instruction)?;
+        if new_val != old_val {
+            return Err(anyhow!(
+                "Breakpoint at {:#x} contained byte {} (expected {})",
+                addr,
+                new_val,
+                old_val
+            ));
+        }
 
         Ok(())
     }
@@ -200,6 +276,10 @@ impl Inferior {
 
     // The following function is adapted from <https://reberhardt.com/cs110l/spring-2020/assignments/project-1/>
     fn write_byte(&mut self, addr: u64, val: u8) -> Result<u8> {
+        if !self.seen_addresses.contains(&addr) {
+            error!("Writing {} to unseen address {}!", val, addr);
+        }
+
         let aligned_addr = utils::align_addr_to_word(addr);
         let byte_offset = addr - aligned_addr;
         let word = ptrace::read(self.pid, aligned_addr as ptrace::AddressType)? as u64;
@@ -263,7 +343,7 @@ pub fn supervise(
     // Right now, we collect data and send it to the analyzer.
     // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
     let mut iterations = 0;
-    let mut temp_disabled_breakpoints: Vec<u64> = Vec::new(); // Keeps track of breakpoints temporarily disabled because we're stepping
+    let mut temp_disabled_breakpoint: Option<u64> = None; // Keeps track of breakpoints temporarily disabled because we're stepping
 
     let is_tracee_intentionally_stopped: Arc<AtomicBool> = Arc::new(false.into());
     let tracee_pid = proc.pid;
@@ -279,7 +359,7 @@ pub fn supervise(
                     Err(_) => break, // Process must be gone
                 };
             }
-            thread::sleep(Duration::from_micros(100));
+            thread::sleep(Duration::from_micros(50));
         }
     });
 
@@ -292,7 +372,7 @@ pub fn supervise(
                 match sig_num {
                     Signal::SIGTRAP | Signal::SIGSTOP => {
                         debug!("Tracee stopped!");
-                        // If it's a sigstop, verify that we sent it ourselves...
+                        // If it's a SIGSTOP, verify that we sent it ourselves...
                         if sig_num == Signal::SIGSTOP {
                             debug!("    ...via SIGSTOP!");
                             if is_tracee_intentionally_stopped.load(Ordering::Relaxed) {
@@ -305,11 +385,11 @@ pub fn supervise(
                         }
 
                         // Re-enable temporarily disabled breakpoints
-                        while !temp_disabled_breakpoints.is_empty() {
-                            let bp = temp_disabled_breakpoints.pop().unwrap();
+                        if let Some(bp) = temp_disabled_breakpoint {
                             proc.enable_breakpoint(bp)
                                 .expect("Unable to re-enable temporarily disabled breakpoint!");
                             debug!("Re-enabled breakpoint!");
+                            temp_disabled_breakpoint = None;
                         }
 
                         // Execute necessary commands
@@ -326,9 +406,16 @@ pub fn supervise(
                         // Handle trap
                         match proc.get_execution_state(Some(exploration_step_id)) {
                             Ok(state) => {
+                                if !proc.has_breakpoint(state.address - 1) {
+                                    proc.seen_addresses.insert(state.address);
+                                }
+
                                 debug!("[{}] Trapped at {}", iterations, state);
                                 let prev_bkpt = state.address - 1;
-                                if proc.has_breakpoint_enabled(prev_bkpt) {
+                                if proc.has_breakpoint_enabled(prev_bkpt)
+                                    && sig_num == Signal::SIGTRAP
+                                {
+                                    assert!(temp_disabled_breakpoint.is_none());
                                     debug!(
                                         "[{}] Hit breakpoint at {:#x}",
                                         iterations, state.address
@@ -338,25 +425,26 @@ pub fn supervise(
                                         .expect("Could not disable breakpoint");
                                     proc.set_instruction_pointer(prev_bkpt)
                                         .expect("Could not rewind instruction pointer");
-                                    temp_disabled_breakpoints.push(prev_bkpt); // We will re-enable post single stepping
+                                    temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
                                     proc.step()?;
                                 } else {
                                     tx.send(state.clone())
                                         .expect("Could not send execution state!");
 
-                                    // If there have been fewer than 250 single steps (TODO: make this configurable),
+                                    // If there have been fewer than 500 single steps (TODO: make this configurable),
                                     // then that means we are still in "exploration mode" — looking for jumps.
-                                    if exploration_single_steps < 50 {
+                                    if exploration_single_steps < 500 {
                                         exploration_single_steps += 1;
                                         proc.step()?;
                                     } else {
-                                        info!(
+                                        debug!(
                                             "[{}] Finished exploration {}!",
                                             iterations, exploration_step_id
                                         );
                                         exploration_single_steps = 0;
                                         exploration_step_id += 1;
                                         proc.cont()?;
+                                        proc.refresh_proc_map()?;
                                     }
                                 }
                             }
@@ -368,13 +456,22 @@ pub fn supervise(
                     }
 
                     Signal::SIGSEGV => {
-                        let state = proc.get_execution_state(Some(exploration_step_id))?;
-                        error!(
-                            "[{}] Hit segmentation fault at {} [breakpoint = {}]",
-                            iterations,
-                            state,
-                            proc.has_breakpoint(state.address - 1)
-                        );
+                        let maybe_state = proc.get_execution_state(Some(exploration_step_id));
+                        if let Ok(state) = maybe_state {
+                            error!(
+                                "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints] [filename = {}]",
+                                iterations,
+                                state,
+                                proc.has_breakpoint(state.address - 1),
+                                proc.breakpoints.len(),
+                                proc.addr_filename(state.address)
+                            );
+                        } else {
+                            error!(
+                                "[{}] Hit segmentation fault; unable to get execution state.",
+                                iterations,
+                            )
+                        }
                         return Err(anyhow!("Segmentation fault!"));
                     }
 
@@ -392,12 +489,21 @@ pub fn supervise(
 
             Ok(WaitStatus::Exited(pid, exit_status)) => {
                 info!(
-                    "process {} exited with status {}, set {} breakpoints",
+                    "Process {} exited with status {}, set {} breakpoints",
                     pid,
                     exit_status,
                     proc.breakpoints.len()
                 );
                 return Ok((iterations, exit_status));
+            }
+
+            Ok(WaitStatus::Signaled(pid, signal, core_dumped)) => {
+                return Err(anyhow!(
+                    "Process {} was killed by signal {}, core dumped? {}",
+                    pid,
+                    signal.as_str(),
+                    core_dumped
+                ));
             }
 
             Ok(status) => {
