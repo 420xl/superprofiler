@@ -24,6 +24,11 @@ pub struct Supervisor {
     state_tx: mpsc::Sender<ExecutionState>,
     command_rx: mpsc::Receiver<SupervisorCommand>,
     proc: Inferior,
+    iterations: u64,
+    breakpoint_hits: u64,
+    temp_disabled_breakpoint: Option<u64>,
+    is_tracee_intentionally_stopped: Arc<AtomicBool>,
+    alarm_thread: Option<thread::JoinHandle<thread::Thread>>,
 }
 
 impl Supervisor {
@@ -36,6 +41,12 @@ impl Supervisor {
             state_tx,
             command_rx,
             proc,
+
+            iterations: 0,
+            breakpoint_hits: 0,
+            temp_disabled_breakpoint: None,
+            is_tracee_intentionally_stopped: Arc::new(false.into()),
+            alarm_thread: None,
         }
     }
 
@@ -48,13 +59,8 @@ impl Supervisor {
     pub fn supervise(&mut self) -> Result<(u64, i32)> {
         // Right now, we collect data and send it to the analyzer.
         // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
-        let mut iterations = 0;
-        let mut breakpoint_hits = 0;
-        let mut temp_disabled_breakpoint: Option<u64> = None; // Keeps track of breakpoints temporarily disabled because we're stepping
-
-        let is_tracee_intentionally_stopped: Arc<AtomicBool> = Arc::new(false.into());
         let tracee_pid = self.proc.pid;
-        let tracee_bool = is_tracee_intentionally_stopped.clone();
+        let tracee_bool = self.is_tracee_intentionally_stopped.clone();
 
         let _alarm_thread = thread::spawn(move || {
             // This will send a SIGTRAP to the tracee periodically
@@ -73,7 +79,7 @@ impl Supervisor {
         let mut exploration_single_steps: i32 = 0;
         let mut exploration_step_id: usize = 0;
         loop {
-            iterations += 1;
+            self.iterations += 1;
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
                     match sig_num {
@@ -82,9 +88,13 @@ impl Supervisor {
                             // If it's a SIGSTOP, verify that we sent it ourselves...
                             if sig_num == Signal::SIGSTOP {
                                 debug!("    ...via SIGSTOP!");
-                                if is_tracee_intentionally_stopped.load(Ordering::Relaxed) {
-                                    is_tracee_intentionally_stopped.store(false, Ordering::Relaxed);
-                                    debug!("    ...caught intentional SIGSTOP! [{}]", iterations);
+                                if self.is_tracee_intentionally_stopped.load(Ordering::Relaxed) {
+                                    self.is_tracee_intentionally_stopped
+                                        .store(false, Ordering::Relaxed);
+                                    debug!(
+                                        "    ...caught intentional SIGSTOP! [{}]",
+                                        self.iterations
+                                    );
                                 } else {
                                     debug!("    ...not intentionally; ignoring...");
                                     continue;
@@ -92,12 +102,12 @@ impl Supervisor {
                             }
 
                             // Re-enable temporarily disabled breakpoints
-                            if let Some(bp) = temp_disabled_breakpoint {
+                            if let Some(bp) = self.temp_disabled_breakpoint {
                                 self.proc
                                     .enable_breakpoint(bp)
                                     .expect("Unable to re-enable temporarily disabled breakpoint!");
                                 debug!("Re-enabled breakpoint!");
-                                temp_disabled_breakpoint = None;
+                                self.temp_disabled_breakpoint = None;
                             }
 
                             // Execute necessary commands
@@ -118,17 +128,17 @@ impl Supervisor {
                                         self.proc.seen_addresses.insert(state.address);
                                     }
 
-                                    debug!("[{}] Trapped at {}", iterations, state);
+                                    debug!("[{}] Trapped at {}", self.iterations, state);
                                     let prev_bkpt = state.address - 1;
                                     if self.proc.has_breakpoint_enabled(prev_bkpt)
                                         && sig_num == Signal::SIGTRAP
                                     {
-                                        assert!(temp_disabled_breakpoint.is_none());
+                                        assert!(self.temp_disabled_breakpoint.is_none());
                                         debug!(
                                             "[{}] Hit breakpoint at {:#x}",
-                                            iterations, state.address
+                                            self.iterations, state.address
                                         );
-                                        breakpoint_hits += 1;
+                                        self.breakpoint_hits += 1;
 
                                         self.proc
                                             .disable_breakpoint(prev_bkpt)
@@ -136,7 +146,7 @@ impl Supervisor {
                                         self.proc
                                             .set_instruction_pointer(prev_bkpt)
                                             .expect("Could not rewind instruction pointer");
-                                        temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
+                                        self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
                                         self.proc.step()?;
                                     } else {
                                         self.state_tx
@@ -151,7 +161,7 @@ impl Supervisor {
                                         } else {
                                             debug!(
                                                 "[{}] Finished exploration {}!",
-                                                iterations, exploration_step_id
+                                                self.iterations, exploration_step_id
                                             );
                                             exploration_single_steps = 0;
                                             exploration_step_id += 1;
@@ -173,7 +183,7 @@ impl Supervisor {
                             if let Ok(state) = maybe_state {
                                 error!(
                                     "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints] [filename = {}]",
-                                    iterations,
+                                    self.iterations,
                                     state,
                                     self.proc.has_breakpoint(state.address - 1),
                                     self.proc.breakpoints.len(),
@@ -182,7 +192,7 @@ impl Supervisor {
                             } else {
                                 error!(
                                     "[{}] Hit segmentation fault; unable to get execution state.",
-                                    iterations,
+                                    self.iterations,
                                 )
                             }
                             return Err(anyhow!("Segmentation fault!"));
@@ -206,9 +216,9 @@ impl Supervisor {
                         pid,
                         exit_status,
                         self.proc.breakpoints.len(),
-                        breakpoint_hits
+                        self.breakpoint_hits
                     );
-                    return Ok((iterations, exit_status));
+                    return Ok((self.iterations, exit_status));
                 }
 
                 Ok(WaitStatus::Signaled(pid, signal, core_dumped)) => {
