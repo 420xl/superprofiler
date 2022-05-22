@@ -37,6 +37,10 @@ impl Instruction {
             length: length,
         }
     }
+
+    pub fn is_breakpoint(&self) -> bool {
+        self.data.as_slice() == 0xCC_u8.to_le_bytes()
+    }
 }
 
 impl fmt::Display for Instruction {

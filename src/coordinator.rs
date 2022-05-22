@@ -16,8 +16,9 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
-use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Condvar;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time;
 use std::time::Duration;
@@ -149,6 +150,13 @@ impl Inferior {
         }
     }
 
+    pub fn has_breakpoint_disabled(&self, addr: u64) -> bool {
+        match self.breakpoints.get(&addr) {
+            Some(val) => !val.enabled,
+            None => false,
+        }
+    }
+
     pub fn disable_breakpoint(&mut self, addr: u64) -> Result<()> {
         let breakpoint = self
             .breakpoints
@@ -156,7 +164,10 @@ impl Inferior {
             .context("breakpoint not found")?;
         breakpoint.enabled = false;
         let to_write = breakpoint.old_data as u8;
-        debug!("Disabling breakpoint at {}; old data: {}", addr, to_write);
+        debug!(
+            "Disabling breakpoint at {:#x}; old data: {}",
+            addr, to_write
+        );
         self.write_byte(addr, to_write)?;
         Ok(())
     }
@@ -254,14 +265,20 @@ pub fn supervise(
     let mut iterations = 0;
     let mut temp_disabled_breakpoints: Vec<u64> = Vec::new(); // Keeps track of breakpoints temporarily disabled because we're stepping
 
+    let is_tracee_intentionally_stopped: Arc<AtomicBool> = Arc::new(false.into());
     let tracee_pid = proc.pid;
-    let alarm_thread = thread::spawn(move || {
+    let tracee_bool = is_tracee_intentionally_stopped.clone();
+
+    let _alarm_thread = thread::spawn(move || {
         // This will send a SIGTRAP to the tracee periodically
         loop {
-            match signal::kill(tracee_pid, Signal::SIGTRAP) {
-                Ok(_) => debug!("sent SIGTRAP to pid {}", tracee_pid),
-                Err(_) => break, // Process must be gone
-            };
+            if !tracee_bool.load(Ordering::Relaxed) {
+                tracee_bool.store(true, Ordering::Relaxed);
+                match signal::kill(tracee_pid, Signal::SIGSTOP) {
+                    Ok(_) => debug!("sent SIGSTOP to pid {}", tracee_pid),
+                    Err(_) => break, // Process must be gone
+                };
+            }
             thread::sleep(Duration::from_micros(100));
         }
     });
@@ -273,7 +290,20 @@ pub fn supervise(
         match proc.wait(None) {
             Ok(WaitStatus::Stopped(_, sig_num)) => {
                 match sig_num {
-                    Signal::SIGTRAP => {
+                    Signal::SIGTRAP | Signal::SIGSTOP => {
+                        debug!("Tracee stopped!");
+                        // If it's a sigstop, verify that we sent it ourselves...
+                        if sig_num == Signal::SIGSTOP {
+                            debug!("    ...via SIGSTOP!");
+                            if is_tracee_intentionally_stopped.load(Ordering::Relaxed) {
+                                is_tracee_intentionally_stopped.store(false, Ordering::Relaxed);
+                                debug!("    ...caught intentional SIGSTOP! [{}]", iterations);
+                            } else {
+                                debug!("    ...not intentionally; ignoring...");
+                                continue;
+                            }
+                        }
+
                         // Re-enable temporarily disabled breakpoints
                         while !temp_disabled_breakpoints.is_empty() {
                             let bp = temp_disabled_breakpoints.pop().unwrap();
@@ -294,19 +324,21 @@ pub fn supervise(
                         }
 
                         // Handle trap
-                        debug!("Trapped!");
                         match proc.get_execution_state(Some(exploration_step_id)) {
                             Ok(state) => {
                                 debug!("[{}] Trapped at {}", iterations, state);
-                                if proc.has_breakpoint_enabled(state.address - 1) {
-                                    let bp_addr = state.address - 1;
-                                    debug!("[{}] Hit breakpoint at {}", iterations, state);
+                                let prev_bkpt = state.address - 1;
+                                if proc.has_breakpoint_enabled(prev_bkpt) {
+                                    debug!(
+                                        "[{}] Hit breakpoint at {:#x}",
+                                        iterations, state.address
+                                    );
 
-                                    proc.disable_breakpoint(bp_addr)
+                                    proc.disable_breakpoint(prev_bkpt)
                                         .expect("Could not disable breakpoint");
-                                    proc.set_instruction_pointer(bp_addr)
+                                    proc.set_instruction_pointer(prev_bkpt)
                                         .expect("Could not rewind instruction pointer");
-                                    temp_disabled_breakpoints.push(bp_addr); // We will re-enable post single stepping
+                                    temp_disabled_breakpoints.push(prev_bkpt); // We will re-enable post single stepping
                                     proc.step()?;
                                 } else {
                                     tx.send(state.clone())
@@ -314,17 +346,24 @@ pub fn supervise(
 
                                     // If there have been fewer than 250 single steps (TODO: make this configurable),
                                     // then that means we are still in "exploration mode" — looking for jumps.
-                                    if exploration_single_steps < 250 {
+                                    if exploration_single_steps < 50 {
                                         exploration_single_steps += 1;
                                         proc.step()?;
                                     } else {
+                                        info!(
+                                            "[{}] Finished exploration {}!",
+                                            iterations, exploration_step_id
+                                        );
                                         exploration_single_steps = 0;
                                         exploration_step_id += 1;
                                         proc.cont()?;
                                     }
                                 }
                             }
-                            Err(err) => error!("Unable to get execution state: {:?}", err),
+                            Err(err) => {
+                                error!("Unable to get execution state: {:?}", err);
+                                proc.cont()?;
+                            }
                         }
                     }
 
@@ -338,9 +377,15 @@ pub fn supervise(
                         );
                         return Err(anyhow!("Segmentation fault!"));
                     }
+
+                    Signal::SIGILL => {
+                        let state = proc.get_execution_state(Some(exploration_step_id))?;
+                        return Err(anyhow!("Invalid instruction at {}", state));
+                    }
+
                     _ => {
                         info!("Signaled: {}", sig_num);
-                        proc.step()?;
+                        proc.cont()?;
                     }
                 }
             }

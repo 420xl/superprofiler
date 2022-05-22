@@ -35,7 +35,10 @@ impl CodeAnalyzer {
         for (preceding, following) in sequence.iter().zip(sequence.iter().skip(1)) {
             // First, check if it's a branch
             let size = preceding.instruction.length;
-            if preceding.address + size as u64 != following.address {
+            if preceding.address + size as u64 != following.address
+                && preceding.address != following.address
+                && !preceding.instruction.is_breakpoint()
+            {
                 // It's a branch! Add it to the known branching instructions.
                 self.known_branching_addresses.insert(preceding.address);
                 info!(
