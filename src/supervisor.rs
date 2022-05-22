@@ -151,7 +151,6 @@ impl Supervisor {
                                 self.exploration_single_steps = 0;
                                 self.exploration_step_id += 1;
                                 self.proc.cont()?;
-                                self.proc.refresh_proc_map()?;
                             }
                         }
                     }
@@ -168,12 +167,11 @@ impl Supervisor {
                     .get_execution_state(Some(self.exploration_step_id));
                 if let Ok(state) = maybe_state {
                     error!(
-                        "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints] [filename = {}]",
+                        "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints]",
                         self.iterations,
                         state,
                         self.proc.has_breakpoint(state.address - 1),
-                        self.proc.breakpoints.len(),
-                        self.proc.addr_filename(state.address)
+                        self.proc.breakpoints.len()
                     );
                 } else {
                     error!(

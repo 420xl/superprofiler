@@ -48,7 +48,6 @@ pub struct Inferior {
     pub pid: Pid, // Will also contain profiling data
     pub breakpoints: HashMap<u64, Breakpoint>,
     pub seen_addresses: HashSet<u64>,
-    proc_map: Option<Vec<MapRange>>,
 }
 
 impl Inferior {
@@ -60,7 +59,6 @@ impl Inferior {
             pid: pid,
             breakpoints: HashMap::new(),
             seen_addresses: HashSet::new(),
-            proc_map: None,
         })
     }
 
@@ -85,45 +83,9 @@ impl Inferior {
             pid: pid,
             breakpoints: HashMap::new(),
             seen_addresses: HashSet::new(),
-            proc_map: None,
         };
 
         Ok(inferior)
-    }
-
-    pub fn refresh_proc_map(&mut self) -> Result<()> {
-        let maps = get_process_maps(self.pid.as_raw())?;
-        self.proc_map = Some(maps);
-
-        Ok(())
-    }
-
-    pub fn addr_map(&self, addr: u64) -> Option<&MapRange> {
-        if let Some(maps) = &self.proc_map {
-            if let Some(val) = maps.iter().find(|map| {
-                let start = map.start() as u64;
-                (addr >= start) && (addr < (start + map.size() as u64))
-            }) {
-                return Some(val);
-            }
-        }
-        None
-    }
-
-    pub fn addr_filename(&self, addr: u64) -> String {
-        if let Some(map) = self.addr_map(addr) {
-            if let Some(path) = map.filename() {
-                return path.to_string_lossy().to_string();
-            }
-        }
-        return "<unknown>".into();
-    }
-
-    pub fn addr_is_executable(&self, addr: u64) -> Option<bool> {
-        if let Some(map) = self.addr_map(addr) {
-            return Some(map.is_exec());
-        }
-        return None;
     }
 
     /// Calls waitpid on this inferior and returns a Status to indicate the state of the process
@@ -156,30 +118,11 @@ impl Inferior {
     }
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
-        if let Some(val) = self.addr_is_executable(addr) {
-            if !val {
-                error!("Trying to write to non-executable location: {:#x}", addr);
-            } else {
-                debug!(
-                    "Setting breakpoint at known executable address: {:#x}",
-                    addr
-                );
-            }
-        }
-        let source_filename = self.addr_filename(addr);
-        if source_filename.contains(".so") || source_filename == "[vdso]" {
-            debug!(
-                "Skipping setting breakpoint in shared object {}",
-                source_filename
-            );
-            return Ok(());
-        }
         if !self.has_breakpoint(addr) {
             let instruction = Instruction::from_data(self.read_memory(addr, 2)?.as_slice());
-            info!(
-                "Setting breakpoint at {} (file: {})",
-                instruction,
-                self.addr_filename(addr)
+            debug!(
+                "Setting breakpoint at {}",
+                instruction
             );
 
             // Setup the breakpoint in our own system

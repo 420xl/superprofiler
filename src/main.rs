@@ -34,12 +34,14 @@ fn main() {
     let (state_tx, state_rx) = channel::<inferior::ExecutionState>();
     let (cmd_tx, cmd_rx) = channel::<supervisor::SupervisorCommand>();
 
-    let analyzer_thread = thread::spawn(|| {
-        analyzer::analyze(state_rx, cmd_tx);
-    });
 
     match process {
         Ok(process) => {
+            let analyzer_proc_pid = process.pid;
+            let analyzer_thread = thread::spawn(move || {
+                analyzer::analyze(state_rx, cmd_tx, analyzer_proc_pid);
+            });
+
             let mut supervisor = supervisor::Supervisor::new(state_tx, cmd_rx, process);
             match supervisor.supervise() {
                 Ok((steps, exit_code)) => info!(
@@ -48,12 +50,13 @@ fn main() {
                 ),
                 Err(err) => error!("error: {:?}", err),
             };
+            drop(supervisor);
+
+            match analyzer_thread.join() {
+                Ok(_) => info!("[analyzer complete]"),
+                Err(err) => error!("error in analyzer: {:?}", err),
+            };
         }
         Err(e) => error!("error [spawning process]: {:?}", e),
-    };
-
-    match analyzer_thread.join() {
-        Ok(_) => info!("[analyzer complete]"),
-        Err(err) => error!("error in analyzer: {:?}", err),
     };
 }
