@@ -1,5 +1,6 @@
-use crate::coordinator::{self, ExecutionState, SupervisorCommand};
+use crate::inferior::{ExecutionState};
 use crate::instruction::Instruction;
+use crate::supervisor::SupervisorCommand;
 use crate::utils;
 use anyhow::Result;
 use log::{debug, info};
@@ -67,7 +68,7 @@ impl CodeAnalyzer {
 
 pub fn analyze(
     state_rx: mpsc::Receiver<ExecutionState>,
-    cmd_tx: mpsc::Sender<coordinator::SupervisorCommand>,
+    cmd_tx: mpsc::Sender<SupervisorCommand>,
 ) {
     let mut analyzer = CodeAnalyzer::new(cmd_tx);
     let mut state_buffer: Vec<ExecutionState> = Vec::new();

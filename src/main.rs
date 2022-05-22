@@ -2,9 +2,10 @@ use clap::Parser;
 extern crate pretty_env_logger;
 
 mod analyzer;
-mod coordinator;
+mod inferior;
 mod instruction;
 mod utils;
+mod supervisor;
 
 use std::sync::mpsc::channel;
 use std::thread;
@@ -27,11 +28,11 @@ fn main() {
 
     // Eventually, we'll expand the CLI interface to allow connecting to already-running processes. But for now...
     let command: String = args.command;
-    let process = coordinator::Inferior::from_command(&command);
+    let process = inferior::Inferior::from_command(&command);
 
     info!("Starting...");
-    let (state_tx, state_rx) = channel::<coordinator::ExecutionState>();
-    let (cmd_tx, cmd_rx) = channel::<coordinator::SupervisorCommand>();
+    let (state_tx, state_rx) = channel::<inferior::ExecutionState>();
+    let (cmd_tx, cmd_rx) = channel::<supervisor::SupervisorCommand>();
 
     let analyzer_thread = thread::spawn(|| {
         analyzer::analyze(state_rx, cmd_tx);
@@ -39,7 +40,8 @@ fn main() {
 
     match process {
         Ok(process) => {
-            match coordinator::supervise(state_tx, cmd_rx, process) {
+            let mut supervisor = supervisor::Supervisor::new(state_tx, cmd_rx, process);
+            match supervisor.supervise() {
                 Ok((steps, exit_code)) => info!(
                     "[process completed with exit code {}, {} steps]",
                     exit_code, steps
