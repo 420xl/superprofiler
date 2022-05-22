@@ -40,12 +40,12 @@ pub struct Options {
     allow_bottlenecking: bool,
 
     /// Sample interval (microseconds; lower is faster)
-    #[clap(short, long, default_value_t=100)]
+    #[clap(short, long, default_value_t = 100)]
     interval: u64,
 
     /// Executable instrumentation allowlist
     #[clap(short, long)]
-    only_instrument: Vec<PathBuf>
+    only_instrument: Vec<PathBuf>,
 }
 
 impl Options {
@@ -63,7 +63,9 @@ fn main() -> Result<()> {
     let process = match (&options.command, &options.pid) {
         (Some(command), None) => inferior::Inferior::from_command(&command),
         (None, Some(pid)) => inferior::Inferior::from_pid(Pid::from_raw(*pid)),
-        (_, _) => Err(anyhow!("Exactly one of `command` and `pid` must be provided!")),
+        (_, _) => Err(anyhow!(
+            "Exactly one of `command` and `pid` must be provided!"
+        )),
     }?;
 
     if options.single {
@@ -78,7 +80,8 @@ fn main() -> Result<()> {
     let analyzer_proc_pid = process.pid;
     let mut analyzer_options = options.clone();
     let analyzer_thread = thread::spawn(move || {
-        let mut analyzer = analyzer::CodeAnalyzer::new(cmd_tx, state_rx, analyzer_proc_pid, &mut analyzer_options);
+        let mut analyzer =
+            analyzer::CodeAnalyzer::new(cmd_tx, state_rx, analyzer_proc_pid, &mut analyzer_options);
         analyzer.analyze();
     });
 

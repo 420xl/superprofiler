@@ -20,11 +20,16 @@ pub struct CodeAnalyzer<'a> {
     info_rx: mpsc::Receiver<ProcMessage>,
     proc_map: Option<Vec<MapRange>>,
     pid: Pid,
-    options: &'a mut Options
+    options: &'a mut Options,
 }
 
 impl<'a> CodeAnalyzer<'a> {
-    pub fn new(cmd_tx: mpsc::Sender<SupervisorCommand>, info_rx: mpsc::Receiver<ProcMessage>, pid: Pid, options: &'a mut Options) -> Self {
+    pub fn new(
+        cmd_tx: mpsc::Sender<SupervisorCommand>,
+        info_rx: mpsc::Receiver<ProcMessage>,
+        pid: Pid,
+        options: &'a mut Options,
+    ) -> Self {
         Self {
             known_branching_instructions: HashSet::new(),
             known_branching_addresses: HashSet::new(),
@@ -44,7 +49,10 @@ impl<'a> CodeAnalyzer<'a> {
         *counter += 1;
         self.total_breakpoint_hits += 1;
 
-        if !self.options.allow_bottlenecking && self.total_breakpoint_hits > 5000 && *counter > (self.total_breakpoint_hits / 10) {
+        if !self.options.allow_bottlenecking
+            && self.total_breakpoint_hits > 5000
+            && *counter > (self.total_breakpoint_hits / 10)
+        {
             info!("Detected bottleneck at {:#x} (accounting for {} of {} active bp hits)! Deinstrumenting...", addr, counter, self.total_breakpoint_hits);
             self.cmd_tx
                 .send(SupervisorCommand::DeleteBreakpoint(addr))?;
@@ -65,8 +73,7 @@ impl<'a> CodeAnalyzer<'a> {
         for (preceding, following) in sequence.iter().zip(sequence.iter().skip(1)) {
             // First, check if it's a branch
             let size = preceding.instruction.length;
-            if 
-                !self.options.no_instrumentation
+            if !self.options.no_instrumentation
                 && preceding.address + size as u64 != following.address
                 && preceding.address != following.address
                 && !preceding.instruction.is_breakpoint()
@@ -172,8 +179,7 @@ impl<'a> CodeAnalyzer<'a> {
                         self.ingest_execution_state(&state);
                         if let Some(id) = state.exploration_step_id {
                             if id != exploration_state_id {
-                                self
-                                    .ingest_single_step_sequence(state_buffer)
+                                self.ingest_single_step_sequence(state_buffer)
                                     .expect("Unable to ingest sequence buffer!");
                                 state_buffer = Vec::new();
                                 exploration_state_id = id;
@@ -182,8 +188,7 @@ impl<'a> CodeAnalyzer<'a> {
                         }
                     }
                     ProcMessage::BreakpointHit(addr) => {
-                        self
-                            .ingest_breakpoint_hit(addr)
+                        self.ingest_breakpoint_hit(addr)
                             .expect("Unable to ingest breakpoint hit!");
                     }
                 },

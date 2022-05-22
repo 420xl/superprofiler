@@ -9,7 +9,7 @@ use nix;
 use nix::sys::ptrace;
 
 use nix::sys::ptrace::Options;
-use nix::sys::signal::{Signal, self};
+use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -118,6 +118,7 @@ impl Inferior {
         Ok(ptrace::cont(self.pid, signal)?)
     }
 
+    #[allow(dead_code)]
     pub fn signal(&self, sig: Signal) -> Result<()> {
         Ok(signal::kill(self.pid, sig)?)
     }
