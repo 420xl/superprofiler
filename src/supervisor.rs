@@ -28,7 +28,9 @@ pub struct Supervisor {
     breakpoint_hits: u64,
     temp_disabled_breakpoint: Option<u64>,
     is_tracee_intentionally_stopped: Arc<AtomicBool>,
-    alarm_thread: Option<thread::JoinHandle<thread::Thread>>,
+    alarm_thread: Option<thread::JoinHandle<()>>,
+    exploration_step_id: usize,
+    exploration_single_steps: usize,
 }
 
 impl Supervisor {
@@ -47,6 +49,9 @@ impl Supervisor {
             temp_disabled_breakpoint: None,
             is_tracee_intentionally_stopped: Arc::new(false.into()),
             alarm_thread: None,
+
+            exploration_step_id: 0,
+            exploration_single_steps: 0,
         }
     }
 
@@ -56,13 +61,149 @@ impl Supervisor {
         }
     }
 
-    pub fn supervise(&mut self) -> Result<(u64, i32)> {
-        // Right now, we collect data and send it to the analyzer.
-        // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
+    fn reenable_stepping_breakpoint(&mut self) -> Result<()> {
+        if let Some(bp) = self.temp_disabled_breakpoint {
+            self.proc.enable_breakpoint(bp)?;
+            debug!("Re-enabled breakpoint!");
+            self.temp_disabled_breakpoint = None;
+        }
+        Ok(())
+    }
+
+    fn execute_incoming_commands(&mut self) -> Result<usize> {
+        let mut total = 0;
+        loop {
+            match self.command_rx.try_recv() {
+                Ok(cmd) => self.execute_command(cmd)?,
+                Err(_) => break, // No commands to run
+            }
+            total += 1;
+        }
+        Ok(total)
+    }
+
+    pub fn handle_stop(&mut self, signal: Signal) -> Result<()> {
+        match signal {
+            Signal::SIGTRAP | Signal::SIGSTOP => {
+                // If it's a SIGSTOP, verify that we sent it ourselves...
+                if signal == Signal::SIGSTOP {
+                    debug!("    ...via SIGSTOP!");
+                    if self.is_tracee_intentionally_stopped.load(Ordering::Relaxed) {
+                        self.is_tracee_intentionally_stopped
+                            .store(false, Ordering::Relaxed);
+                        debug!("    ...caught intentional SIGSTOP! [{}]", self.iterations);
+                    } else {
+                        debug!("    ...not intentionally; ignoring...");
+                        return Ok(());
+                    }
+                }
+
+                // Re-enable temporarily disabled breakpoints
+                self.reenable_stepping_breakpoint()?;
+
+                // Execute necessary commands
+                self.execute_incoming_commands()?;
+
+                // Handle trap
+                match self
+                    .proc
+                    .get_execution_state(Some(self.exploration_step_id))
+                {
+                    Ok(state) => {
+                        if !self.proc.has_breakpoint(state.address - 1) {
+                            self.proc.seen_addresses.insert(state.address);
+                        }
+
+                        debug!("[{}] Trapped at {}", self.iterations, state);
+                        let prev_bkpt = state.address - 1;
+                        if self.proc.has_breakpoint_enabled(prev_bkpt) && signal == Signal::SIGTRAP
+                        {
+                            assert!(self.temp_disabled_breakpoint.is_none());
+                            debug!(
+                                "[{}] Hit breakpoint at {:#x}",
+                                self.iterations, state.address
+                            );
+                            self.breakpoint_hits += 1;
+
+                            self.proc
+                                .disable_breakpoint(prev_bkpt)
+                                .expect("Could not disable breakpoint");
+                            self.proc
+                                .set_instruction_pointer(prev_bkpt)
+                                .expect("Could not rewind instruction pointer");
+                            self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
+                            self.proc.step()?;
+                        } else {
+                            self.state_tx
+                                .send(state.clone())
+                                .expect("Could not send execution state!");
+
+                            // If there have been fewer than 500 single steps (TODO: make this configurable),
+                            // then that means we are still in "exploration mode" — looking for jumps.
+                            if self.exploration_single_steps < 500 {
+                                self.exploration_single_steps += 1;
+                                self.proc.step()?;
+                            } else {
+                                debug!(
+                                    "[{}] Finished exploration {}!",
+                                    self.iterations, self.exploration_step_id
+                                );
+                                self.exploration_single_steps = 0;
+                                self.exploration_step_id += 1;
+                                self.proc.cont()?;
+                                self.proc.refresh_proc_map()?;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error!("Unable to get execution state: {:?}", err);
+                        self.proc.cont()?;
+                    }
+                }
+            }
+
+            Signal::SIGSEGV => {
+                let maybe_state = self
+                    .proc
+                    .get_execution_state(Some(self.exploration_step_id));
+                if let Ok(state) = maybe_state {
+                    error!(
+                        "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints] [filename = {}]",
+                        self.iterations,
+                        state,
+                        self.proc.has_breakpoint(state.address - 1),
+                        self.proc.breakpoints.len(),
+                        self.proc.addr_filename(state.address)
+                    );
+                } else {
+                    error!(
+                        "[{}] Hit segmentation fault; unable to get execution state.",
+                        self.iterations,
+                    )
+                }
+                return Err(anyhow!("Segmentation fault!"));
+            }
+
+            Signal::SIGILL => {
+                let state = self
+                    .proc
+                    .get_execution_state(Some(self.exploration_step_id))?;
+                return Err(anyhow!("Invalid instruction at {}", state));
+            }
+
+            _ => {
+                info!("Signaled: {}", signal);
+                self.proc.cont()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn_alarm_thread(&mut self) -> Result<()> {
         let tracee_pid = self.proc.pid;
         let tracee_bool = self.is_tracee_intentionally_stopped.clone();
 
-        let _alarm_thread = thread::spawn(move || {
+        self.alarm_thread = Some(thread::spawn(move || {
             // This will send a SIGTRAP to the tracee periodically
             loop {
                 if !tracee_bool.load(Ordering::Relaxed) {
@@ -74,140 +215,21 @@ impl Supervisor {
                 }
                 thread::sleep(Duration::from_micros(25));
             }
-        });
+        }));
 
-        let mut exploration_single_steps: i32 = 0;
-        let mut exploration_step_id: usize = 0;
+        Ok(())
+    }
+
+    pub fn supervise(&mut self) -> Result<(u64, i32)> {
+        // Right now, we collect data and send it to the analyzer.
+        // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
+        self.spawn_alarm_thread()?;
+
         loop {
             self.iterations += 1;
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
-                    match sig_num {
-                        Signal::SIGTRAP | Signal::SIGSTOP => {
-                            debug!("Tracee stopped!");
-                            // If it's a SIGSTOP, verify that we sent it ourselves...
-                            if sig_num == Signal::SIGSTOP {
-                                debug!("    ...via SIGSTOP!");
-                                if self.is_tracee_intentionally_stopped.load(Ordering::Relaxed) {
-                                    self.is_tracee_intentionally_stopped
-                                        .store(false, Ordering::Relaxed);
-                                    debug!(
-                                        "    ...caught intentional SIGSTOP! [{}]",
-                                        self.iterations
-                                    );
-                                } else {
-                                    debug!("    ...not intentionally; ignoring...");
-                                    continue;
-                                }
-                            }
-
-                            // Re-enable temporarily disabled breakpoints
-                            if let Some(bp) = self.temp_disabled_breakpoint {
-                                self.proc
-                                    .enable_breakpoint(bp)
-                                    .expect("Unable to re-enable temporarily disabled breakpoint!");
-                                debug!("Re-enabled breakpoint!");
-                                self.temp_disabled_breakpoint = None;
-                            }
-
-                            // Execute necessary commands
-                            loop {
-                                match self.command_rx.try_recv() {
-                                    Ok(cmd) => match self.execute_command(cmd) {
-                                        Ok(_) => {}
-                                        Err(err) => error!("error: {}", err.to_string()),
-                                    },
-                                    Err(_) => break, // No commands to run
-                                }
-                            }
-
-                            // Handle trap
-                            match self.proc.get_execution_state(Some(exploration_step_id)) {
-                                Ok(state) => {
-                                    if !self.proc.has_breakpoint(state.address - 1) {
-                                        self.proc.seen_addresses.insert(state.address);
-                                    }
-
-                                    debug!("[{}] Trapped at {}", self.iterations, state);
-                                    let prev_bkpt = state.address - 1;
-                                    if self.proc.has_breakpoint_enabled(prev_bkpt)
-                                        && sig_num == Signal::SIGTRAP
-                                    {
-                                        assert!(self.temp_disabled_breakpoint.is_none());
-                                        debug!(
-                                            "[{}] Hit breakpoint at {:#x}",
-                                            self.iterations, state.address
-                                        );
-                                        self.breakpoint_hits += 1;
-
-                                        self.proc
-                                            .disable_breakpoint(prev_bkpt)
-                                            .expect("Could not disable breakpoint");
-                                        self.proc
-                                            .set_instruction_pointer(prev_bkpt)
-                                            .expect("Could not rewind instruction pointer");
-                                        self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
-                                        self.proc.step()?;
-                                    } else {
-                                        self.state_tx
-                                            .send(state.clone())
-                                            .expect("Could not send execution state!");
-
-                                        // If there have been fewer than 500 single steps (TODO: make this configurable),
-                                        // then that means we are still in "exploration mode" — looking for jumps.
-                                        if exploration_single_steps < 500 {
-                                            exploration_single_steps += 1;
-                                            self.proc.step()?;
-                                        } else {
-                                            debug!(
-                                                "[{}] Finished exploration {}!",
-                                                self.iterations, exploration_step_id
-                                            );
-                                            exploration_single_steps = 0;
-                                            exploration_step_id += 1;
-                                            self.proc.cont()?;
-                                            self.proc.refresh_proc_map()?;
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("Unable to get execution state: {:?}", err);
-                                    self.proc.cont()?;
-                                }
-                            }
-                        }
-
-                        Signal::SIGSEGV => {
-                            let maybe_state =
-                                self.proc.get_execution_state(Some(exploration_step_id));
-                            if let Ok(state) = maybe_state {
-                                error!(
-                                    "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints] [filename = {}]",
-                                    self.iterations,
-                                    state,
-                                    self.proc.has_breakpoint(state.address - 1),
-                                    self.proc.breakpoints.len(),
-                                    self.proc.addr_filename(state.address)
-                                );
-                            } else {
-                                error!(
-                                    "[{}] Hit segmentation fault; unable to get execution state.",
-                                    self.iterations,
-                                )
-                            }
-                            return Err(anyhow!("Segmentation fault!"));
-                        }
-
-                        Signal::SIGILL => {
-                            let state = self.proc.get_execution_state(Some(exploration_step_id))?;
-                            return Err(anyhow!("Invalid instruction at {}", state));
-                        }
-
-                        _ => {
-                            info!("Signaled: {}", sig_num);
-                            self.proc.cont()?;
-                        }
-                    }
+                    self.handle_stop(sig_num).expect("Could not handle stop!");
                 }
 
                 Ok(WaitStatus::Exited(pid, exit_status)) => {
@@ -223,7 +245,7 @@ impl Supervisor {
 
                 Ok(WaitStatus::Signaled(pid, signal, core_dumped)) => {
                     return Err(anyhow!(
-                        "Process {} was killed by signal {}, core dumped? {}",
+                        "Process {} was killed by signal {}, core dumped = {}",
                         pid,
                         signal.as_str(),
                         core_dumped
