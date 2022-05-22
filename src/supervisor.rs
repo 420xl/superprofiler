@@ -14,12 +14,12 @@ use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::sys::wait::WaitStatus;
 
+use crate::inferior::Inferior;
 use crate::inferior::ProcMessage;
-use crate::inferior::{Inferior};
 
 pub enum SupervisorCommand {
     SetBreakpoint(u64),
-    DeleteBreakpoint(u64)
+    DeleteBreakpoint(u64),
 }
 
 pub struct Supervisor {
@@ -36,7 +36,9 @@ pub struct Supervisor {
 }
 
 enum StopOutcome {
-    Step, Continue, Nothing
+    Step,
+    Continue,
+    Nothing,
 }
 
 impl Supervisor {
@@ -64,14 +66,16 @@ impl Supervisor {
     fn execute_command(&mut self, command: SupervisorCommand) -> Result<()> {
         match command {
             SupervisorCommand::SetBreakpoint(addr) => self.proc.set_breakpoint(addr),
-            SupervisorCommand::DeleteBreakpoint(addr) => self.proc.delete_breakpoint(addr)
+            SupervisorCommand::DeleteBreakpoint(addr) => self.proc.delete_breakpoint(addr),
         }
     }
 
     fn reenable_stepping_breakpoint(&mut self) {
         if let Some(bp) = self.temp_disabled_breakpoint {
             if self.proc.has_breakpoint_disabled(bp) {
-                self.proc.enable_breakpoint(bp).expect("unable to re-enable breakpoint");
+                self.proc
+                    .enable_breakpoint(bp)
+                    .expect("unable to re-enable breakpoint");
                 debug!("Re-enabled breakpoint!");
             }
             self.temp_disabled_breakpoint = None;
@@ -127,7 +131,7 @@ impl Supervisor {
                             );
                             self.breakpoint_hits += 1;
                             self.info_tx.send(ProcMessage::BreakpointHit(prev_bkpt))?;
-                            
+
                             self.proc.disable_breakpoint(prev_bkpt)?;
                             self.proc.set_instruction_pointer(prev_bkpt)?;
                             self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
@@ -224,7 +228,7 @@ impl Supervisor {
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
                     let outcome = self.handle_stop(sig_num).expect("Could not handle stop!");
-                    
+
                     // Execute necessary commands
                     if let Err(err) = self.execute_incoming_commands() {
                         error!("error executing commands: {}", err);
@@ -236,7 +240,7 @@ impl Supervisor {
                     match outcome {
                         StopOutcome::Continue => self.proc.cont()?,
                         StopOutcome::Step => self.proc.step()?,
-                        StopOutcome::Nothing => {},
+                        StopOutcome::Nothing => {}
                     }
                 }
 

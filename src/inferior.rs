@@ -178,7 +178,9 @@ impl Inferior {
 
     pub fn delete_breakpoint(&mut self, addr: u64) -> Result<()> {
         self.disable_breakpoint(addr)?;
-        self.breakpoints.remove(&addr).ok_or(anyhow!("unable to delete breakpoint"))?;
+        self.breakpoints
+            .remove(&addr)
+            .ok_or(anyhow!("unable to delete breakpoint"))?;
         Ok(())
     }
 

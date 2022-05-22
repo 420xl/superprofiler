@@ -41,7 +41,8 @@ impl CodeAnalyzer {
 
         if self.total_breakpoint_hits > 5000 && *counter > (self.total_breakpoint_hits / 10) {
             info!("Detected bottleneck at {:#x} (accounting for {} of {} active bp hits)! Deinstrumenting...", addr, counter, self.total_breakpoint_hits);
-            self.cmd_tx.send(SupervisorCommand::DeleteBreakpoint(addr))?;
+            self.cmd_tx
+                .send(SupervisorCommand::DeleteBreakpoint(addr))?;
             self.total_breakpoint_hits -= *counter;
         }
         debug!("Saw hit at {:#x}", addr);
@@ -158,7 +159,9 @@ pub fn analyze(
                     }
                 }
                 ProcMessage::BreakpointHit(addr) => {
-                    analyzer.ingest_breakpoint_hit(addr).expect("Unable to ingest breakpoint hit!");
+                    analyzer
+                        .ingest_breakpoint_hit(addr)
+                        .expect("Unable to ingest breakpoint hit!");
                 }
             },
             Err(_) => {
