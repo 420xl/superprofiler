@@ -1,11 +1,11 @@
-use crate::inferior::ExecutionState;
+use crate::inferior::{ExecutionState, ProcMessage};
 use crate::instruction::Instruction;
 use crate::supervisor::SupervisorCommand;
 use crate::utils;
 use anyhow::Result;
 use log::{debug, info};
 use nix::unistd::Pid;
-use proc_maps::{MapRange, get_process_maps};
+use proc_maps::{get_process_maps, MapRange};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
@@ -13,9 +13,11 @@ pub struct CodeAnalyzer {
     known_branching_instructions: HashSet<Instruction>,
     known_branching_addresses: HashSet<u64>,
     seen_addresses: HashMap<u64, u64>,
+    breakpoint_hits: HashMap<u64, u64>,
+    total_breakpoint_hits: u64,
     cmd_tx: mpsc::Sender<SupervisorCommand>,
     proc_map: Option<Vec<MapRange>>,
-    pid: Pid
+    pid: Pid,
 }
 
 impl CodeAnalyzer {
@@ -24,14 +26,29 @@ impl CodeAnalyzer {
             known_branching_instructions: HashSet::new(),
             known_branching_addresses: HashSet::new(),
             seen_addresses: HashMap::new(),
+            breakpoint_hits: HashMap::new(),
+            total_breakpoint_hits: 0,
             proc_map: None,
             cmd_tx,
-            pid
+            pid,
         }
     }
 
+    pub fn ingest_breakpoint_hit(&mut self, addr: u64) -> Result<()> {
+        let counter = self.breakpoint_hits.entry(addr).or_insert(0);
+        *counter += 1;
+        self.total_breakpoint_hits += 1;
+
+        if self.total_breakpoint_hits > 5000 && *counter > (self.total_breakpoint_hits / 10) {
+            info!("Detected bottleneck at {:#x} (accounting for {} of {} total hits)! Deinstrumenting...", addr, counter, self.total_breakpoint_hits);
+            self.cmd_tx.send(SupervisorCommand::DeleteBreakpoint(addr))?;
+            self.total_breakpoint_hits -= *counter;
+        }
+        debug!("Saw hit at {:#x}", addr);
+        Ok(())
+    }
+
     pub fn ingest_execution_state(&mut self, state: &ExecutionState) {
-        let _size = state.instruction.length;
         let counter = self.seen_addresses.entry(state.address).or_insert(0);
         *counter += 1;
     }
@@ -46,7 +63,9 @@ impl CodeAnalyzer {
                 && preceding.address != following.address
                 && !preceding.instruction.is_breakpoint()
                 && !self.known_branching_addresses.contains(&preceding.address)
-                && self.addr_is_instrumentable(preceding.address).unwrap_or(false)
+                && self
+                    .addr_is_instrumentable(preceding.address)
+                    .unwrap_or(false)
             {
                 // It's a branch! Add it to the known branching instructions.
                 self.known_branching_addresses.insert(preceding.address);
@@ -103,13 +122,6 @@ impl CodeAnalyzer {
         return "<unknown>".into();
     }
 
-    fn addr_is_executable(&self, addr: u64) -> Option<bool> {
-        if let Some(map) = self.addr_map(addr) {
-            return Some(map.is_exec());
-        }
-        return None;
-    }
-
     fn addr_is_instrumentable(&self, addr: u64) -> Option<bool> {
         if let Some(map) = self.addr_map(addr) {
             if let Some(path) = map.filename() {
@@ -121,25 +133,34 @@ impl CodeAnalyzer {
     }
 }
 
-pub fn analyze(state_rx: mpsc::Receiver<ExecutionState>, cmd_tx: mpsc::Sender<SupervisorCommand>, pid: Pid) {
+pub fn analyze(
+    info_rx: mpsc::Receiver<ProcMessage>,
+    cmd_tx: mpsc::Sender<SupervisorCommand>,
+    pid: Pid,
+) {
     let mut analyzer = CodeAnalyzer::new(cmd_tx, pid);
     let mut state_buffer: Vec<ExecutionState> = Vec::new();
     let mut exploration_state_id: usize = 0;
     loop {
-        match state_rx.recv() {
-            Ok(state) => {
-                analyzer.ingest_execution_state(&state);
-                if let Some(id) = state.exploration_step_id {
-                    if id != exploration_state_id {
-                        analyzer
-                            .ingest_single_step_sequence(state_buffer)
-                            .expect("Unable to ingest sequence buffer!");
-                        state_buffer = Vec::new();
-                        exploration_state_id = id;
+        match info_rx.recv() {
+            Ok(message) => match message {
+                ProcMessage::State(state) => {
+                    analyzer.ingest_execution_state(&state);
+                    if let Some(id) = state.exploration_step_id {
+                        if id != exploration_state_id {
+                            analyzer
+                                .ingest_single_step_sequence(state_buffer)
+                                .expect("Unable to ingest sequence buffer!");
+                            state_buffer = Vec::new();
+                            exploration_state_id = id;
+                        }
+                        state_buffer.push(state);
                     }
-                    state_buffer.push(state);
                 }
-            }
+                ProcMessage::BreakpointHit(addr) => {
+                    analyzer.ingest_breakpoint_hit(addr).expect("Unable to ingest breakpoint hit!");
+                }
+            },
             Err(_) => {
                 break;
             }

@@ -10,8 +10,6 @@ use nix::sys::ptrace;
 
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use proc_maps::get_process_maps;
-use proc_maps::MapRange;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -29,6 +27,11 @@ pub struct ExecutionState {
     pub address: u64,
     pub instruction: Instruction,
     pub exploration_step_id: Option<usize>,
+}
+
+pub enum ProcMessage {
+    State(ExecutionState),
+    BreakpointHit(u64),
 }
 
 impl fmt::Display for ExecutionState {
@@ -120,10 +123,7 @@ impl Inferior {
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
         if !self.has_breakpoint(addr) {
             let instruction = Instruction::from_data(self.read_memory(addr, 2)?.as_slice());
-            debug!(
-                "Setting breakpoint at {}",
-                instruction
-            );
+            debug!("Setting breakpoint at {}", instruction);
 
             // Setup the breakpoint in our own system
             let breakpoint = Breakpoint {
@@ -173,6 +173,12 @@ impl Inferior {
             addr, to_write
         );
         self.write_byte(addr, to_write)?;
+        Ok(())
+    }
+
+    pub fn delete_breakpoint(&mut self, addr: u64) -> Result<()> {
+        self.disable_breakpoint(addr)?;
+        self.breakpoints.remove(&addr).ok_or(anyhow!("unable to delete breakpoint"))?;
         Ok(())
     }
 

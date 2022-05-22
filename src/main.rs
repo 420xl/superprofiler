@@ -31,9 +31,8 @@ fn main() {
     let process = inferior::Inferior::from_command(&command);
 
     info!("Starting...");
-    let (state_tx, state_rx) = channel::<inferior::ExecutionState>();
+    let (state_tx, state_rx) = channel::<inferior::ProcMessage>();
     let (cmd_tx, cmd_rx) = channel::<supervisor::SupervisorCommand>();
-
 
     match process {
         Ok(process) => {
@@ -50,7 +49,7 @@ fn main() {
                 ),
                 Err(err) => error!("error: {:?}", err),
             };
-            drop(supervisor);
+            drop(supervisor); // Required to close the mpsc streams, thus causing the analyzer_thread to complete.
 
             match analyzer_thread.join() {
                 Ok(_) => info!("[analyzer complete]"),

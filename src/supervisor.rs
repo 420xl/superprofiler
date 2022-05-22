@@ -14,14 +14,16 @@ use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::sys::wait::WaitStatus;
 
-use crate::inferior::{ExecutionState, Inferior};
+use crate::inferior::ProcMessage;
+use crate::inferior::{Inferior};
 
 pub enum SupervisorCommand {
     SetBreakpoint(u64),
+    DeleteBreakpoint(u64)
 }
 
 pub struct Supervisor {
-    state_tx: mpsc::Sender<ExecutionState>,
+    info_tx: mpsc::Sender<ProcMessage>,
     command_rx: mpsc::Receiver<SupervisorCommand>,
     proc: Inferior,
     iterations: u64,
@@ -35,12 +37,12 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn new(
-        state_tx: mpsc::Sender<ExecutionState>,
+        info_tx: mpsc::Sender<ProcMessage>,
         command_rx: mpsc::Receiver<SupervisorCommand>,
         proc: Inferior,
     ) -> Self {
         Self {
-            state_tx,
+            info_tx,
             command_rx,
             proc,
 
@@ -58,6 +60,7 @@ impl Supervisor {
     fn execute_command(&mut self, command: SupervisorCommand) -> Result<()> {
         match command {
             SupervisorCommand::SetBreakpoint(addr) => self.proc.set_breakpoint(addr),
+            SupervisorCommand::DeleteBreakpoint(addr) => self.proc.delete_breakpoint(addr)
         }
     }
 
@@ -102,7 +105,9 @@ impl Supervisor {
                 self.reenable_stepping_breakpoint()?;
 
                 // Execute necessary commands
-                self.execute_incoming_commands()?;
+                if let Err(err) = self.execute_incoming_commands() {
+                    error!("error executing commands: {}", err);
+                }
 
                 // Handle trap
                 match self
@@ -124,19 +129,14 @@ impl Supervisor {
                                 self.iterations, state.address
                             );
                             self.breakpoint_hits += 1;
-
-                            self.proc
-                                .disable_breakpoint(prev_bkpt)
-                                .expect("Could not disable breakpoint");
-                            self.proc
-                                .set_instruction_pointer(prev_bkpt)
-                                .expect("Could not rewind instruction pointer");
+                            self.info_tx.send(ProcMessage::BreakpointHit(prev_bkpt))?;
+                            
+                            self.proc.disable_breakpoint(prev_bkpt)?;
+                            self.proc.set_instruction_pointer(prev_bkpt)?;
                             self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
                             self.proc.step()?;
                         } else {
-                            self.state_tx
-                                .send(state.clone())
-                                .expect("Could not send execution state!");
+                            self.info_tx.send(ProcMessage::State(state.clone()))?;
 
                             // If there have been fewer than 500 single steps (TODO: make this configurable),
                             // then that means we are still in "exploration mode" — looking for jumps.
