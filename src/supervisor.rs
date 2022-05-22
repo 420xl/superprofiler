@@ -16,13 +16,14 @@ use nix::sys::wait::WaitStatus;
 
 use crate::inferior::Inferior;
 use crate::inferior::ProcMessage;
+use crate::Options;
 
 pub enum SupervisorCommand {
     SetBreakpoint(u64),
     DeleteBreakpoint(u64),
 }
 
-pub struct Supervisor {
+pub struct Supervisor<'a> {
     info_tx: mpsc::Sender<ProcMessage>,
     command_rx: mpsc::Receiver<SupervisorCommand>,
     proc: Inferior,
@@ -33,24 +34,27 @@ pub struct Supervisor {
     alarm_thread: Option<thread::JoinHandle<()>>,
     exploration_step_id: usize,
     exploration_single_steps: usize,
+    options: &'a Options,
 }
 
 enum StopOutcome {
-    Step,
-    Continue,
+    Step(Option<Signal>),
+    Continue(Option<Signal>),
     Nothing,
 }
 
-impl Supervisor {
+impl<'a> Supervisor<'a> {
     pub fn new(
         info_tx: mpsc::Sender<ProcMessage>,
         command_rx: mpsc::Receiver<SupervisorCommand>,
         proc: Inferior,
+        options: &'a Options,
     ) -> Self {
         Self {
             info_tx,
             command_rx,
             proc,
+            options,
 
             iterations: 0,
             breakpoint_hits: 0,
@@ -135,7 +139,7 @@ impl Supervisor {
                             self.proc.disable_breakpoint(prev_bkpt)?;
                             self.proc.set_instruction_pointer(prev_bkpt)?;
                             self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
-                            return Ok(StopOutcome::Step);
+                            return Ok(StopOutcome::Step(None));
                         } else {
                             self.info_tx.send(ProcMessage::State(state.clone()))?;
 
@@ -143,7 +147,7 @@ impl Supervisor {
                             // then that means we are still in "exploration mode" — looking for jumps.
                             if self.exploration_single_steps < 500 {
                                 self.exploration_single_steps += 1;
-                                return Ok(StopOutcome::Step);
+                                return Ok(StopOutcome::Step(None));
                             } else {
                                 debug!(
                                     "[{}] Finished exploration {}!",
@@ -151,13 +155,13 @@ impl Supervisor {
                                 );
                                 self.exploration_single_steps = 0;
                                 self.exploration_step_id += 1;
-                                return Ok(StopOutcome::Continue);
+                                return Ok(StopOutcome::Continue(None));
                             }
                         }
                     }
                     Err(err) => {
                         error!("Unable to get execution state: {:?}", err);
-                        return Ok(StopOutcome::Continue);
+                        return Ok(StopOutcome::Continue(None));
                     }
                 }
             }
@@ -192,12 +196,12 @@ impl Supervisor {
 
             _ => {
                 info!("Signaled: {}", signal);
-                return Ok(StopOutcome::Continue);
+                return Ok(StopOutcome::Continue(Some(signal)));
             }
         }
     }
 
-    fn spawn_alarm_thread(&mut self) -> Result<()> {
+    fn spawn_alarm_thread(&mut self, interval: u64) -> Result<()> {
         let tracee_pid = self.proc.pid;
         let tracee_bool = self.is_tracee_intentionally_stopped.clone();
 
@@ -211,7 +215,7 @@ impl Supervisor {
                         Err(_) => break, // Process must be gone
                     };
                 }
-                thread::sleep(Duration::from_micros(25));
+                thread::sleep(Duration::from_micros(interval));
             }
         }));
 
@@ -221,7 +225,10 @@ impl Supervisor {
     pub fn supervise(&mut self) -> Result<(u64, i32)> {
         // Right now, we collect data and send it to the analyzer.
         // Help from <https://gist.github.com/carstein/6f4a4fdf04ec002d5494a11d2cf525c7>
-        self.spawn_alarm_thread()?;
+        if !self.options.single {
+            // If we're single stepping, then we don't want to sample; single stepping will get everything.
+            self.spawn_alarm_thread(self.options.interval)?;
+        }
 
         loop {
             self.iterations += 1;
@@ -238,8 +245,14 @@ impl Supervisor {
                     self.reenable_stepping_breakpoint();
 
                     match outcome {
-                        StopOutcome::Continue => self.proc.cont()?,
-                        StopOutcome::Step => self.proc.step()?,
+                        StopOutcome::Continue(sig) => {
+                            if self.options.single {
+                                self.proc.step(sig)?
+                            } else {
+                                self.proc.cont(sig)?
+                            }
+                        }
+                        StopOutcome::Step(sig) => self.proc.step(sig)?,
                         StopOutcome::Nothing => {}
                     }
                 }
@@ -266,7 +279,7 @@ impl Supervisor {
 
                 Ok(status) => {
                     info!("Received status: {:?}", status);
-                    self.proc.cont()?;
+                    self.proc.cont(None)?;
                 }
 
                 Err(err) => {

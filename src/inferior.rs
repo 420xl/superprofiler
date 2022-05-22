@@ -8,6 +8,8 @@ use nix;
 
 use nix::sys::ptrace;
 
+use nix::sys::ptrace::Options;
+use nix::sys::signal::{Signal, self};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
@@ -56,7 +58,7 @@ pub struct Inferior {
 impl Inferior {
     #[allow(dead_code)]
     pub fn from_pid(pid: Pid) -> Result<Self> {
-        ptrace::attach(pid)?;
+        ptrace::seize(pid, Options::empty())?;
 
         Ok(Self {
             pid: pid,
@@ -103,8 +105,8 @@ impl Inferior {
         Ok(ptrace::kill(self.pid)?)
     }
 
-    pub fn step(&mut self) -> Result<()> {
-        Ok(ptrace::step(self.pid, None)?)
+    pub fn step(&mut self, signal: Option<Signal>) -> Result<()> {
+        Ok(ptrace::step(self.pid, signal)?)
     }
 
     #[allow(dead_code)]
@@ -112,8 +114,12 @@ impl Inferior {
         Ok(ptrace::interrupt(self.pid)?)
     }
 
-    pub fn cont(&mut self) -> Result<()> {
-        Ok(ptrace::cont(self.pid, None)?)
+    pub fn cont(&mut self, signal: Option<Signal>) -> Result<()> {
+        Ok(ptrace::cont(self.pid, signal)?)
+    }
+
+    pub fn signal(&self, sig: Signal) -> Result<()> {
+        Ok(signal::kill(self.pid, sig)?)
     }
 
     pub fn get_registers(&mut self) -> Result<libc::user_regs_struct> {

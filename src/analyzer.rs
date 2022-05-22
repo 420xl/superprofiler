@@ -1,27 +1,30 @@
 use crate::inferior::{ExecutionState, ProcMessage};
 use crate::instruction::Instruction;
 use crate::supervisor::SupervisorCommand;
-use crate::utils;
+use crate::{utils, Options};
 use anyhow::Result;
 use log::{debug, info};
 use nix::unistd::Pid;
 use proc_maps::{get_process_maps, MapRange};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::mpsc;
 
-pub struct CodeAnalyzer {
+pub struct CodeAnalyzer<'a> {
     known_branching_instructions: HashSet<Instruction>,
     known_branching_addresses: HashSet<u64>,
     seen_addresses: HashMap<u64, u64>,
     breakpoint_hits: HashMap<u64, u64>,
     total_breakpoint_hits: u64,
     cmd_tx: mpsc::Sender<SupervisorCommand>,
+    info_rx: mpsc::Receiver<ProcMessage>,
     proc_map: Option<Vec<MapRange>>,
     pid: Pid,
+    options: &'a mut Options
 }
 
-impl CodeAnalyzer {
-    pub fn new(cmd_tx: mpsc::Sender<SupervisorCommand>, pid: Pid) -> Self {
+impl<'a> CodeAnalyzer<'a> {
+    pub fn new(cmd_tx: mpsc::Sender<SupervisorCommand>, info_rx: mpsc::Receiver<ProcMessage>, pid: Pid, options: &'a mut Options) -> Self {
         Self {
             known_branching_instructions: HashSet::new(),
             known_branching_addresses: HashSet::new(),
@@ -29,7 +32,9 @@ impl CodeAnalyzer {
             breakpoint_hits: HashMap::new(),
             total_breakpoint_hits: 0,
             proc_map: None,
+            options,
             cmd_tx,
+            info_rx,
             pid,
         }
     }
@@ -39,7 +44,7 @@ impl CodeAnalyzer {
         *counter += 1;
         self.total_breakpoint_hits += 1;
 
-        if self.total_breakpoint_hits > 5000 && *counter > (self.total_breakpoint_hits / 10) {
+        if !self.options.allow_bottlenecking && self.total_breakpoint_hits > 5000 && *counter > (self.total_breakpoint_hits / 10) {
             info!("Detected bottleneck at {:#x} (accounting for {} of {} active bp hits)! Deinstrumenting...", addr, counter, self.total_breakpoint_hits);
             self.cmd_tx
                 .send(SupervisorCommand::DeleteBreakpoint(addr))?;
@@ -60,7 +65,9 @@ impl CodeAnalyzer {
         for (preceding, following) in sequence.iter().zip(sequence.iter().skip(1)) {
             // First, check if it's a branch
             let size = preceding.instruction.length;
-            if preceding.address + size as u64 != following.address
+            if 
+                !self.options.no_instrumentation
+                && preceding.address + size as u64 != following.address
                 && preceding.address != following.address
                 && !preceding.instruction.is_breakpoint()
                 && !self.known_branching_addresses.contains(&preceding.address)
@@ -126,46 +133,63 @@ impl CodeAnalyzer {
     fn addr_is_instrumentable(&self, addr: u64) -> Option<bool> {
         if let Some(map) = self.addr_map(addr) {
             if let Some(path) = map.filename() {
-                let name = path.to_string_lossy().to_string();
-                return Some(map.is_exec() && !(name.contains(".so") || name == "[vdso]"));
+                return Some(self.options.only_instrument.iter().any(|p| p == path));
             }
         }
         return None;
     }
-}
 
-pub fn analyze(
-    info_rx: mpsc::Receiver<ProcMessage>,
-    cmd_tx: mpsc::Sender<SupervisorCommand>,
-    pid: Pid,
-) {
-    let mut analyzer = CodeAnalyzer::new(cmd_tx, pid);
-    let mut state_buffer: Vec<ExecutionState> = Vec::new();
-    let mut exploration_state_id: usize = 0;
-    loop {
-        match info_rx.recv() {
-            Ok(message) => match message {
-                ProcMessage::State(state) => {
-                    analyzer.ingest_execution_state(&state);
-                    if let Some(id) = state.exploration_step_id {
-                        if id != exploration_state_id {
-                            analyzer
-                                .ingest_single_step_sequence(state_buffer)
-                                .expect("Unable to ingest sequence buffer!");
-                            state_buffer = Vec::new();
-                            exploration_state_id = id;
+    pub fn extract_instrumentable_executables(&mut self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Ok(_) = self.refresh_proc_map() {
+            if let Some(maps) = &self.proc_map {
+                for map in maps {
+                    if let Some(path) = map.filename() {
+                        let name = path.to_string_lossy().to_string();
+                        if map.is_exec() && !(name.contains(".so") || name.contains("[")) {
+                            paths.push(path.to_path_buf());
                         }
-                        state_buffer.push(state);
                     }
                 }
-                ProcMessage::BreakpointHit(addr) => {
-                    analyzer
-                        .ingest_breakpoint_hit(addr)
-                        .expect("Unable to ingest breakpoint hit!");
+            }
+        }
+        paths
+    }
+
+    pub fn analyze(&mut self) {
+        if self.options.only_instrument.len() == 0 && self.options.should_instrument() {
+            let executables = self.extract_instrumentable_executables();
+            info!("No explicit binaries provided to instrument. I therefore did my best to find binaries to instrument. I will instrument: {}", executables.iter().map(|x| x.to_string_lossy().to_string()).collect::<Vec<String>>().join(", "));
+            self.options.only_instrument = executables;
+        }
+
+        let mut state_buffer: Vec<ExecutionState> = Vec::new();
+        let mut exploration_state_id: usize = 0;
+        loop {
+            match self.info_rx.recv() {
+                Ok(message) => match message {
+                    ProcMessage::State(state) => {
+                        self.ingest_execution_state(&state);
+                        if let Some(id) = state.exploration_step_id {
+                            if id != exploration_state_id {
+                                self
+                                    .ingest_single_step_sequence(state_buffer)
+                                    .expect("Unable to ingest sequence buffer!");
+                                state_buffer = Vec::new();
+                                exploration_state_id = id;
+                            }
+                            state_buffer.push(state);
+                        }
+                    }
+                    ProcMessage::BreakpointHit(addr) => {
+                        self
+                            .ingest_breakpoint_hit(addr)
+                            .expect("Unable to ingest breakpoint hit!");
+                    }
+                },
+                Err(_) => {
+                    break;
                 }
-            },
-            Err(_) => {
-                break;
             }
         }
     }
