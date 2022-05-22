@@ -40,7 +40,7 @@ impl CodeAnalyzer {
         self.total_breakpoint_hits += 1;
 
         if self.total_breakpoint_hits > 5000 && *counter > (self.total_breakpoint_hits / 10) {
-            info!("Detected bottleneck at {:#x} (accounting for {} of {} total hits)! Deinstrumenting...", addr, counter, self.total_breakpoint_hits);
+            info!("Detected bottleneck at {:#x} (accounting for {} of {} active bp hits)! Deinstrumenting...", addr, counter, self.total_breakpoint_hits);
             self.cmd_tx.send(SupervisorCommand::DeleteBreakpoint(addr))?;
             self.total_breakpoint_hits -= *counter;
         }
