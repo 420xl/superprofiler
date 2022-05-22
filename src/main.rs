@@ -4,8 +4,8 @@ extern crate pretty_env_logger;
 mod analyzer;
 mod inferior;
 mod instruction;
-mod utils;
 mod supervisor;
+mod utils;
 
 use std::sync::mpsc::channel;
 use std::thread;

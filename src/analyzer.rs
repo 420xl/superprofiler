@@ -1,9 +1,9 @@
-use crate::inferior::{ExecutionState};
+use crate::inferior::ExecutionState;
 use crate::instruction::Instruction;
 use crate::supervisor::SupervisorCommand;
 use crate::utils;
 use anyhow::Result;
-use log::{debug, info};
+use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
@@ -66,10 +66,7 @@ impl CodeAnalyzer {
     }
 }
 
-pub fn analyze(
-    state_rx: mpsc::Receiver<ExecutionState>,
-    cmd_tx: mpsc::Sender<SupervisorCommand>,
-) {
+pub fn analyze(state_rx: mpsc::Receiver<ExecutionState>, cmd_tx: mpsc::Sender<SupervisorCommand>) {
     let mut analyzer = CodeAnalyzer::new(cmd_tx);
     let mut state_buffer: Vec<ExecutionState> = Vec::new();
     let mut exploration_state_id: usize = 0;

@@ -5,9 +5,9 @@ use anyhow::Context;
 use anyhow::Result;
 use log::{debug, error, info};
 use nix;
-use nix::sys::personality::{self, Persona};
+
 use nix::sys::ptrace;
-use nix::sys::signal::{self, Signal};
+
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use proc_maps::get_process_maps;
@@ -18,11 +18,9 @@ use std::fmt;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread;
+
 use std::time;
-use std::time::Duration;
+
 use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
