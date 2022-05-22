@@ -38,12 +38,12 @@ impl CodeAnalyzer {
             if preceding.address + size as u64 != following.address {
                 // It's a branch! Add it to the known branching instructions.
                 self.known_branching_addresses.insert(preceding.address);
-                debug!(
-                    "Detected branch instruction at {}: {} (addr offset: {}, expected: {})",
+                info!(
+                    "Detected branch instruction at {:#x}: {} (addr offset: {}, expected: {})",
                     preceding.address,
                     preceding.instruction,
                     utils::offset(preceding.address, following.address),
-                    size
+                    size,
                 );
                 self.known_branching_instructions
                     .insert(preceding.instruction.clone());
