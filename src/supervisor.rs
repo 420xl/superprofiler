@@ -35,6 +35,10 @@ pub struct Supervisor {
     exploration_single_steps: usize,
 }
 
+enum StopOutcome {
+    Step, Continue, Nothing
+}
+
 impl Supervisor {
     pub fn new(
         info_tx: mpsc::Sender<ProcMessage>,
@@ -64,13 +68,14 @@ impl Supervisor {
         }
     }
 
-    fn reenable_stepping_breakpoint(&mut self) -> Result<()> {
+    fn reenable_stepping_breakpoint(&mut self) {
         if let Some(bp) = self.temp_disabled_breakpoint {
-            self.proc.enable_breakpoint(bp)?;
-            debug!("Re-enabled breakpoint!");
+            if self.proc.has_breakpoint_disabled(bp) {
+                self.proc.enable_breakpoint(bp).expect("unable to re-enable breakpoint");
+                debug!("Re-enabled breakpoint!");
+            }
             self.temp_disabled_breakpoint = None;
         }
-        Ok(())
     }
 
     fn execute_incoming_commands(&mut self) -> Result<usize> {
@@ -85,7 +90,7 @@ impl Supervisor {
         Ok(total)
     }
 
-    pub fn handle_stop(&mut self, signal: Signal) -> Result<()> {
+    fn handle_stop(&mut self, signal: Signal) -> Result<StopOutcome> {
         match signal {
             Signal::SIGTRAP | Signal::SIGSTOP => {
                 // If it's a SIGSTOP, verify that we sent it ourselves...
@@ -97,16 +102,8 @@ impl Supervisor {
                         debug!("    ...caught intentional SIGSTOP! [{}]", self.iterations);
                     } else {
                         debug!("    ...not intentionally; ignoring...");
-                        return Ok(());
+                        return Ok(StopOutcome::Nothing);
                     }
-                }
-
-                // Re-enable temporarily disabled breakpoints
-                self.reenable_stepping_breakpoint()?;
-
-                // Execute necessary commands
-                if let Err(err) = self.execute_incoming_commands() {
-                    error!("error executing commands: {}", err);
                 }
 
                 // Handle trap
@@ -134,7 +131,7 @@ impl Supervisor {
                             self.proc.disable_breakpoint(prev_bkpt)?;
                             self.proc.set_instruction_pointer(prev_bkpt)?;
                             self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
-                            self.proc.step()?;
+                            return Ok(StopOutcome::Step);
                         } else {
                             self.info_tx.send(ProcMessage::State(state.clone()))?;
 
@@ -142,7 +139,7 @@ impl Supervisor {
                             // then that means we are still in "exploration mode" — looking for jumps.
                             if self.exploration_single_steps < 500 {
                                 self.exploration_single_steps += 1;
-                                self.proc.step()?;
+                                return Ok(StopOutcome::Step);
                             } else {
                                 debug!(
                                     "[{}] Finished exploration {}!",
@@ -150,13 +147,13 @@ impl Supervisor {
                                 );
                                 self.exploration_single_steps = 0;
                                 self.exploration_step_id += 1;
-                                self.proc.cont()?;
+                                return Ok(StopOutcome::Continue);
                             }
                         }
                     }
                     Err(err) => {
                         error!("Unable to get execution state: {:?}", err);
-                        self.proc.cont()?;
+                        return Ok(StopOutcome::Continue);
                     }
                 }
             }
@@ -191,10 +188,9 @@ impl Supervisor {
 
             _ => {
                 info!("Signaled: {}", signal);
-                self.proc.cont()?;
+                return Ok(StopOutcome::Continue);
             }
         }
-        Ok(())
     }
 
     fn spawn_alarm_thread(&mut self) -> Result<()> {
@@ -227,7 +223,21 @@ impl Supervisor {
             self.iterations += 1;
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
-                    self.handle_stop(sig_num).expect("Could not handle stop!");
+                    let outcome = self.handle_stop(sig_num).expect("Could not handle stop!");
+                    
+                    // Execute necessary commands
+                    if let Err(err) = self.execute_incoming_commands() {
+                        error!("error executing commands: {}", err);
+                    }
+
+                    // Re-enable temporarily disabled breakpoints
+                    self.reenable_stepping_breakpoint();
+
+                    match outcome {
+                        StopOutcome::Continue => self.proc.cont()?,
+                        StopOutcome::Step => self.proc.step()?,
+                        StopOutcome::Nothing => {},
+                    }
                 }
 
                 Ok(WaitStatus::Exited(pid, exit_status)) => {
