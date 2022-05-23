@@ -5,6 +5,13 @@ use anyhow::Context;
 use anyhow::Result;
 use log::{debug, error, info};
 use nix;
+use nix::sys::personality;
+use nix::sys::personality::Persona;
+use unwind::Accessors;
+use unwind::AddressSpace;
+use unwind::Byteorder;
+use unwind::PTraceState;
+use unwind::{Cursor, RegNum};
 
 use nix::sys::ptrace;
 
@@ -24,11 +31,19 @@ use std::time;
 use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
+pub struct Stackframe {
+    pub address: u64,
+    pub func_name: Option<String>,
+    pub func_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ExecutionState {
     pub time: SystemTime,
     pub address: u64,
     pub instruction: Instruction,
     pub exploration_step_id: Option<usize>,
+    pub trace: Option<Vec<Stackframe>>,
 }
 
 pub enum ProcMessage {
@@ -39,6 +54,9 @@ pub enum ProcMessage {
 impl fmt::Display for ExecutionState {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         write!(fmt, "{:#x}: {}", self.address, self.instruction)?;
+        if let Some(trace) = &self.trace {
+            write!(fmt, " ({} frames)", trace.len())?;
+        }
         Ok(())
     }
 }
@@ -76,7 +94,7 @@ impl Inferior {
             Command::new(executable)
                 .args(args)
                 .pre_exec(|| {
-                    // personality::set(personality::get()? | Persona::ADDR_NO_RANDOMIZE)?;
+                    personality::set(personality::get()? | Persona::ADDR_NO_RANDOMIZE)?;
                     // Adapted from <https://docs.rs/spawn-ptrace/latest/src/spawn_ptrace/lib.rs.html#57>
                     ptrace::traceme().map_err(|e| io::Error::from_raw_os_error(e as i32))
                 })
@@ -265,18 +283,64 @@ impl Inferior {
         Ok(())
     }
 
+    pub fn trace(&self) -> Result<Vec<Stackframe>> {
+        let ptrace_state = PTraceState::new(self.pid.as_raw().try_into().unwrap())?;
+        let space = AddressSpace::new(Accessors::ptrace(), Byteorder::DEFAULT)?;
+        let mut cursor = Cursor::remote(&space, &ptrace_state)?;
+
+        let mut frame: Vec<Stackframe> = Vec::new();
+
+        loop {
+            let ip = cursor.register(RegNum::IP)?;
+
+            match (cursor.procedure_info(), cursor.procedure_name()) {
+                (Ok(ref info), Ok(ref name)) if ip == info.start_ip() + name.offset() => {
+                    frame.push(Stackframe {
+                        address: ip,
+                        func_name: Some(name.name().to_string()),
+                        func_offset: Some(name.offset()),
+                    });
+                }
+                _ => {
+                    frame.push(Stackframe {
+                        address: ip,
+                        func_name: None,
+                        func_offset: None,
+                    });
+                }
+            }
+
+            if !cursor.step()? {
+                break;
+            }
+        }
+
+        Ok(frame)
+    }
+
     pub fn get_execution_state(
         &mut self,
         exploration_step_id: Option<usize>,
+        perform_trace: bool,
     ) -> Result<ExecutionState> {
         let regs = self.get_registers()?;
 
         let addr = regs.rip; // TODO: Make platform independent
+
+        let trace = match perform_trace {
+            true => match self.trace() {
+                Ok(val) => Some(val),
+                Err(_) => None,
+            },
+            false => None,
+        };
+
         Ok(ExecutionState {
             address: addr,
             instruction: Instruction::from_data(self.read_memory(addr, 2)?.as_slice()),
             time: time::SystemTime::now(),
             exploration_step_id,
+            trace,
         })
     }
 }

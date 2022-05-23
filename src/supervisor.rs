@@ -117,7 +117,7 @@ impl<'a> Supervisor<'a> {
                 // Handle trap
                 match self
                     .proc
-                    .get_execution_state(Some(self.exploration_step_id))
+                    .get_execution_state(Some(self.exploration_step_id), signal == Signal::SIGSTOP)
                 {
                     Ok(state) => {
                         if !self.proc.has_breakpoint(state.address - 1) {
@@ -169,7 +169,7 @@ impl<'a> Supervisor<'a> {
             Signal::SIGSEGV => {
                 let maybe_state = self
                     .proc
-                    .get_execution_state(Some(self.exploration_step_id));
+                    .get_execution_state(Some(self.exploration_step_id), true);
                 if let Ok(state) = maybe_state {
                     error!(
                         "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints]",
@@ -190,7 +190,7 @@ impl<'a> Supervisor<'a> {
             Signal::SIGILL => {
                 let state = self
                     .proc
-                    .get_execution_state(Some(self.exploration_step_id))?;
+                    .get_execution_state(Some(self.exploration_step_id), true)?;
                 return Err(anyhow!("Invalid instruction at {}", state));
             }
 

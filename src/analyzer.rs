@@ -1,5 +1,6 @@
 use crate::inferior::{ExecutionState, ProcMessage};
 use crate::instruction::Instruction;
+use crate::profiler::ProfilerMessage;
 use crate::supervisor::SupervisorCommand;
 use crate::{utils, Options};
 use anyhow::Result;
@@ -18,6 +19,7 @@ pub struct CodeAnalyzer<'a> {
     total_breakpoint_hits: u64,
     cmd_tx: mpsc::Sender<SupervisorCommand>,
     info_rx: mpsc::Receiver<ProcMessage>,
+    profiler_tx: mpsc::Sender<ProfilerMessage>,
     proc_map: Option<Vec<MapRange>>,
     pid: Pid,
     options: &'a mut Options,
@@ -27,6 +29,7 @@ impl<'a> CodeAnalyzer<'a> {
     pub fn new(
         cmd_tx: mpsc::Sender<SupervisorCommand>,
         info_rx: mpsc::Receiver<ProcMessage>,
+        profiler_tx: mpsc::Sender<ProfilerMessage>,
         pid: Pid,
         options: &'a mut Options,
     ) -> Self {
@@ -37,6 +40,7 @@ impl<'a> CodeAnalyzer<'a> {
             breakpoint_hits: HashMap::new(),
             total_breakpoint_hits: 0,
             proc_map: None,
+            profiler_tx,
             options,
             cmd_tx,
             info_rx,
@@ -65,6 +69,9 @@ impl<'a> CodeAnalyzer<'a> {
     pub fn ingest_execution_state(&mut self, state: &ExecutionState) {
         let counter = self.seen_addresses.entry(state.address).or_insert(0);
         *counter += 1;
+        self.profiler_tx
+            .send(ProfilerMessage::State(state.clone()))
+            .expect("unable to send execution state to profiler");
     }
 
     pub fn ingest_single_step_sequence(&mut self, sequence: Vec<ExecutionState>) -> Result<()> {

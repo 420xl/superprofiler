@@ -7,6 +7,7 @@ use anyhow::Result;
 mod analyzer;
 mod inferior;
 mod instruction;
+mod profiler;
 mod supervisor;
 mod utils;
 
@@ -69,19 +70,31 @@ fn main() -> Result<()> {
     }?;
 
     if options.single {
-        info!("Running using single stepping! This will be slow. I will also disable instrumentation, single single stepping makes it redundant.");
+        info!("Running using single stepping! This will be slow. I will also disable instrumentation, since single stepping makes it redundant.");
         options.no_instrumentation = true;
     }
 
     info!("Starting...");
     let (state_tx, state_rx) = channel::<inferior::ProcMessage>();
     let (cmd_tx, cmd_rx) = channel::<supervisor::SupervisorCommand>();
+    let (profiler_tx, profiler_rx) = channel::<profiler::ProfilerMessage>();
+
+    let profiler_options = options.clone();
+    let profiler_thread = thread::spawn(move || {
+        let mut profiler = profiler::Profiler::new(profiler_rx, &profiler_options);
+        profiler.profile();
+    });
 
     let analyzer_proc_pid = process.pid;
     let mut analyzer_options = options.clone();
     let analyzer_thread = thread::spawn(move || {
-        let mut analyzer =
-            analyzer::CodeAnalyzer::new(cmd_tx, state_rx, analyzer_proc_pid, &mut analyzer_options);
+        let mut analyzer = analyzer::CodeAnalyzer::new(
+            cmd_tx,
+            state_rx,
+            profiler_tx,
+            analyzer_proc_pid,
+            &mut analyzer_options,
+        );
         analyzer.analyze();
     });
 
@@ -96,8 +109,13 @@ fn main() -> Result<()> {
     drop(supervisor); // Required to close the mpsc streams, thus causing the analyzer_thread to complete.
 
     match analyzer_thread.join() {
-        Ok(_) => info!("[analyzer complete]"),
+        Ok(_) => info!("[dynamic analyzer complete]"),
         Err(err) => error!("error in analyzer: {:?}", err),
+    };
+
+    match profiler_thread.join() {
+        Ok(_) => info!("[profiling complete]"),
+        Err(err) => error!("error in profiler: {:?}", err),
     };
 
     Ok(())
