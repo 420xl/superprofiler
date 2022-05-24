@@ -1,21 +1,36 @@
-use std::sync::mpsc::Receiver;
-
+use anyhow::Result;
 use log::{debug, info};
+use std::fs::{self, File};
+use std::io::Write;
+use std::sync::mpsc::Receiver;
 
 use crate::{inferior::ExecutionState, Options};
 
 pub enum ProfilerMessage {
     State(ExecutionState),
+    FunctionCall(String),
 }
 
 pub struct Profiler<'a> {
     options: &'a Options,
     receiver: Receiver<ProfilerMessage>,
+    function_call_file: File,
+    stacktrace_file: File,
 }
 
 impl<'a> Profiler<'a> {
-    pub fn new(receiver: Receiver<ProfilerMessage>, options: &'a Options) -> Self {
-        Self { options, receiver }
+    pub fn new(receiver: Receiver<ProfilerMessage>, options: &'a Options) -> Result<Self> {
+        let function_call_file =
+            File::create(format!("{}_calls.txt", options.name.as_ref().unwrap()))?;
+        let stacktrace_file =
+            File::create(format!("{}_stacks.txt", options.name.as_ref().unwrap()))?;
+
+        Ok(Self {
+            options,
+            receiver,
+            function_call_file,
+            stacktrace_file,
+        })
     }
 
     pub fn profile(&mut self) {
@@ -23,11 +38,28 @@ impl<'a> Profiler<'a> {
             match self.receiver.recv() {
                 Ok(message) => match message {
                     ProfilerMessage::State(state) => {
-                        for frame in state.trace.unwrap_or(vec![]) {
-                            if let Some(name) = frame.func_name {
-                                info!("    tb -> {:#}", rustc_demangle::demangle(&name));
-                            }
+                        if let Some(vec) = state.trace {
+                            let default_name = "<unknown>".to_string();
+                            self.stacktrace_file
+                                .write_all(
+                                    format!(
+                                        "{}\n",
+                                        vec.iter()
+                                            .map(|x| x.func_name.as_ref().unwrap_or(&default_name))
+                                            .map(|x| format!("{:#}", rustc_demangle::demangle(&x)))
+                                            .collect::<Vec<String>>()
+                                            .join("/")
+                                    )
+                                    .as_bytes(),
+                                )
+                                .expect("Unable to write stacktrace to file");
                         }
+                    }
+                    ProfilerMessage::FunctionCall(name) => {
+                        let func = rustc_demangle::demangle(&name);
+                        self.function_call_file
+                            .write_all(format!("{}\n", func).as_bytes())
+                            .expect("Unable to write function call to file");
                     }
                 },
                 Err(_) => break,

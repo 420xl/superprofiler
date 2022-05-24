@@ -2,6 +2,14 @@
 
 The superprofiler uses a combination of random sampling and dynamic code analysis to achieve high precision profiling with comparatively lower overhead (aspirationally, at least). Like all good modern CLI tools, it is written in Rust.
 
+## TODO
+
+- Narrow instrumentation to a specific function
+- Find some way to show which basic blocks are running most
+- Show as flamegraph
+- Output parquet
+- Log syscalls
+
 ## Design Goals
 
 - Architecture independent...

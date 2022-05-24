@@ -114,10 +114,15 @@ impl<'a> Supervisor<'a> {
                     }
                 }
 
+                let collect_trace = match signal == Signal::SIGSTOP {
+                    true => rand::random::<f32>() < self.options.trace_prob,
+                    false => false,
+                };
+
                 // Handle trap
                 match self
                     .proc
-                    .get_execution_state(Some(self.exploration_step_id), signal == Signal::SIGSTOP)
+                    .get_execution_state(Some(self.exploration_step_id), collect_trace)
                 {
                     Ok(state) => {
                         if !self.proc.has_breakpoint(state.address - 1) {

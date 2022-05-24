@@ -11,6 +11,7 @@ mod profiler;
 mod supervisor;
 mod utils;
 
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::{sync::mpsc::channel, thread};
 
@@ -47,6 +48,18 @@ pub struct Options {
     /// Executable instrumentation allowlist
     #[clap(short, long)]
     only_instrument: Vec<PathBuf>,
+
+    /// The probability of collecting a trace on any given sample (not from instrumentation) (to disable traces, set to zero) (between zero and one)
+    #[clap(short, long, default_value_t = 0.1)]
+    trace_prob: f32,
+
+    /// The number of functions to ignore at the bottom of the callstack when instrumenting
+    #[clap(long, default_value_t = 5)]
+    func_instrumentation_depth: u64,
+
+    /// The run name (used to generate output files)
+    #[clap(short, long)]
+    name: Option<String>,
 }
 
 impl Options {
@@ -74,6 +87,17 @@ fn main() -> Result<()> {
         options.no_instrumentation = true;
     }
 
+    if options.name.is_none() {
+        options.name = Some(format!("sp"));
+    }
+
+    if options.trace_prob > 1. || options.trace_prob < 0. {
+        return Err(anyhow!(
+            "`trace_prob` must be in the range [0, 1], got {}",
+            options.trace_prob
+        ));
+    }
+
     info!("Starting...");
     let (state_tx, state_rx) = channel::<inferior::ProcMessage>();
     let (cmd_tx, cmd_rx) = channel::<supervisor::SupervisorCommand>();
@@ -81,7 +105,8 @@ fn main() -> Result<()> {
 
     let profiler_options = options.clone();
     let profiler_thread = thread::spawn(move || {
-        let mut profiler = profiler::Profiler::new(profiler_rx, &profiler_options);
+        let mut profiler = profiler::Profiler::new(profiler_rx, &profiler_options)
+            .expect("Unable to create profiler");
         profiler.profile();
     });
 

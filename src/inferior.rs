@@ -247,7 +247,7 @@ impl Inferior {
     // The following function is adapted from <https://reberhardt.com/cs110l/spring-2020/assignments/project-1/>
     fn write_byte(&mut self, addr: u64, val: u8) -> Result<u8> {
         if !self.seen_addresses.contains(&addr) {
-            error!("Writing {} to unseen address {}!", val, addr);
+            debug!("Writing {} to unseen address {:#x}!", val, addr);
         }
 
         let aligned_addr = utils::align_addr_to_word(addr);
