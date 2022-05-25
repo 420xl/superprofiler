@@ -43,12 +43,13 @@ impl<'a> Profiler<'a> {
                             self.stacktrace_file
                                 .write_all(
                                     format!(
-                                        "{}\n",
+                                        "{} 1\n",
                                         vec.iter()
+                                            .rev()
                                             .map(|x| x.func_name.as_ref().unwrap_or(&default_name))
                                             .map(|x| x.to_string())
                                             .collect::<Vec<String>>()
-                                            .join("/")
+                                            .join(";")
                                     )
                                     .as_bytes(),
                                 )

@@ -300,7 +300,13 @@ impl Inferior {
                         func_offset: Some(name.offset()),
                     });
                 }
-                _ => {}
+                _ => {
+                    frame.push(Stackframe {
+                        address: ip,
+                        func_name: Some(format!("<unknown @ {:#x}>", ip)),
+                        func_offset: None,
+                    });
+                }
             }
 
             if !cursor.step()? {

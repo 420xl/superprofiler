@@ -115,7 +115,7 @@ impl<'a> Supervisor<'a> {
                     }
                 }
 
-                let collect_trace = match signal == Signal::SIGSTOP {
+                let collect_trace = match signal == Signal::SIGSTOP || self.options.single {
                     true => rand::random::<f32>() < self.options.trace_prob,
                     false => false,
                 };

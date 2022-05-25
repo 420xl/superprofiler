@@ -8,7 +8,6 @@ use log::{debug, info};
 use nix::unistd::Pid;
 use proc_maps::{get_process_maps, MapRange};
 use std::collections::hash_map::Entry::Occupied;
-use std::collections::hash_map::Entry::Vacant;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
