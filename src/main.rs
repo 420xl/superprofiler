@@ -46,11 +46,11 @@ pub struct Options {
     interval: u64,
 
     /// Executable instrumentation allowlist
-    #[clap(short, long)]
+    #[clap(long)]
     only_instrument_execs: Vec<PathBuf>,
 
     /// Function instrumentation allowlist
-    #[clap(short, long)]
+    #[clap(long)]
     only_funcs: Option<Vec<String>>,
 
     /// The probability of collecting a trace on any given sample (not from instrumentation) (to disable traces, set to zero) (between zero and one)
@@ -62,7 +62,7 @@ pub struct Options {
     func_instrumentation_depth: u64,
 
     /// The run name (used to generate output files)
-    #[clap(short, long)]
+    #[clap(long)]
     name: Option<String>,
 }
 
