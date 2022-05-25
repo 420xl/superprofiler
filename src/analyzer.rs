@@ -220,7 +220,7 @@ impl<'a> CodeAnalyzer<'a> {
     }
 
     fn addr_is_instrumentable(&self, addr: u64) -> Option<bool> {
-        // Bit of a mgafunction to check whether an address is instrumentable. Here's how it works.
+        // Bit of a megafunction to check whether an address is instrumentable. Here's how it works.
 
         if let Some(map) = self.addr_map(addr) {
             // First, we verify it's in our address map (given to us by Linux).
