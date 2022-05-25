@@ -2,6 +2,18 @@
 
 The superprofiler uses a combination of random sampling and dynamic code analysis to achieve high precision profiling with comparatively lower overhead (aspirationally, at least). Like all good modern CLI tools, it is written in Rust.
 
+## Building from source
+Install [Rust](https://rustup.rs/) and the following (if you are on Ubuntu):
+```
+sudo apt-get install build-essential # if you don't have C toolchain
+sudo apt-get install pkg-config
+sudo apt-get install libunwind-dev
+```
+In order to build the superprofiler, clone this repository and run `cargo build`. Note that installing `libunwind` might be a bottleneck on other operating systems.
+
+## Supported architectures
+Currently, the superprofiler supports AArch64 (ARM64) [TODO] and x86.
+
 ## TODO
 
 - Narrow instrumentation to a specific function
