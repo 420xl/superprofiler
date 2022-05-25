@@ -1,4 +1,4 @@
-use crate::inferior::{ExecutionState, ProcMessage};
+use crate::inferior::{ExecutionState, ProcMessage, Stackframe};
 use crate::instruction::Instruction;
 use crate::profiler::ProfilerMessage;
 use crate::supervisor::SupervisorCommand;
@@ -8,6 +8,7 @@ use log::{debug, info};
 use nix::unistd::Pid;
 use proc_maps::{get_process_maps, MapRange};
 use std::collections::hash_map::Entry::Occupied;
+use std::collections::hash_map::Entry::Vacant;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -16,7 +17,8 @@ pub struct CodeAnalyzer<'a> {
     known_branching_instructions: HashSet<Instruction>,
     instrumented_addresses: HashSet<u64>,
     seen_addresses: HashMap<u64, u64>,
-    known_function_addresses: HashMap<u64, String>,
+    known_function_start_addresses: HashMap<u64, String>,
+    known_function_addresses: HashMap<u64, Stackframe>,
     breakpoint_hits: HashMap<u64, u64>,
     total_breakpoint_hits: u64,
     cmd_tx: mpsc::Sender<SupervisorCommand>,
@@ -40,6 +42,7 @@ impl<'a> CodeAnalyzer<'a> {
             instrumented_addresses: HashSet::new(),
             seen_addresses: HashMap::new(),
             breakpoint_hits: HashMap::new(),
+            known_function_start_addresses: HashMap::new(),
             known_function_addresses: HashMap::new(),
             total_breakpoint_hits: 0,
             proc_map: None,
@@ -75,43 +78,69 @@ impl<'a> CodeAnalyzer<'a> {
         *counter += 1;
 
         if let Some(stack) = &state.trace {
+            // Remember that this address corresponds to this function (at a potential offset)
+            if let Some(bottom) = stack.get(0) {
+                self.known_function_addresses
+                    .entry(state.address)
+                    .or_insert_with(|| bottom.clone());
+            }
+
             for function in stack
                 .iter()
                 .skip(self.options.func_instrumentation_depth.try_into()?)
             {
-                if function.func_name.is_some()
-                    && !self
-                        .known_function_addresses
+                if function.func_name.is_some() {
+                    // Remember that this function strat address corresponds to this function
+                    self.known_function_addresses
+                        .entry(function.address)
+                        .or_insert_with(|| function.clone());
+
+                    // Also record the function _start_ addresses
+                    if !self
+                        .known_function_start_addresses
                         .contains_key(&function.address)
-                    && !self.instrumented_addresses.contains(&function.address)
-                {
-                    if self
-                        .addr_is_instrumentable(function.address)
-                        .unwrap_or(false)
-                        && !self.options.no_instrumentation
+                        && !self.instrumented_addresses.contains(&function.address)
                     {
-                        info!(
-                            "Instrumenting function {:#} at {:#x} [exec: {}]",
-                            rustc_demangle::demangle(function.func_name.as_ref().unwrap()),
+                        if self
+                            .addr_is_instrumentable(function.address)
+                            .unwrap_or(false)
+                            && !self.options.no_instrumentation
+                        {
+                            info!(
+                                "Instrumenting function {:#} at {:#x} [exec: {}]",
+                                function.func_name.as_ref().unwrap(),
+                                function.address,
+                                self.addr_filename(function.address)
+                            );
+                            self.cmd_tx
+                                .send(SupervisorCommand::SetBreakpoint(function.address))?;
+                            self.instrumented_addresses.insert(function.address);
+                        }
+                        debug!("Function {} starts at {:#x}", function.func_name.as_ref().unwrap(), function.address);
+                        self.known_function_start_addresses.insert(
                             function.address,
-                            self.addr_filename(function.address)
+                            function.func_name.as_ref().unwrap().clone(),
                         );
-                        self.cmd_tx
-                            .send(SupervisorCommand::SetBreakpoint(function.address))?;
-                        self.instrumented_addresses.insert(function.address);
                     }
-                    self.known_function_addresses.insert(
-                        function.address,
-                        function.func_name.as_ref().unwrap().clone(),
-                    );
                 }
             }
         }
 
         // If it's a function call, notify profiler
-        if let Occupied(name) = self.known_function_addresses.entry(state.address) {
-            self.profiler_tx
-                .send(ProfilerMessage::FunctionCall(name.get().clone()))?;
+        if let Occupied(name) = self.known_function_start_addresses.entry(state.address) {
+            let func_name = name.get();
+            if self.options.only_funcs.is_none()
+                || self
+                    .options
+                    .only_funcs
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|x| x == func_name)
+            {
+                self.profiler_tx
+                    .send(ProfilerMessage::FunctionCall(name.get().clone()))?;
+            }
         }
 
         // Give the profiler general information
@@ -192,9 +221,26 @@ impl<'a> CodeAnalyzer<'a> {
     }
 
     fn addr_is_instrumentable(&self, addr: u64) -> Option<bool> {
+        // Bit of a mgafunction to check whether an address is instrumentable. Here's how it works.
+
         if let Some(map) = self.addr_map(addr) {
+            // First, we verify it's in our address map (given to us by Linux).
             if let Some(path) = map.filename() {
-                return Some(self.options.only_instrument.iter().any(|p| p == path));
+                // Then, we verify that it has a source executable name (e.g., `/usr/bin/echo`)
+                if self.options.only_instrument_execs.iter().any(|p| p == path) {
+                    // Next, we verify we're allowed to instrument this executable
+                    return match &self.options.only_funcs {
+                        // Then, we check whether we're only supposed to instrument certain functions. If so, we verify the address is in one such function.
+                        Some(allowlist) => match self.known_function_addresses.get(&addr) {
+                            Some(value) => match value.func_name.as_ref() {
+                                Some(name) => Some(allowlist.iter().any(|x| x == name)),
+                                None => Some(false),
+                            },
+                            None => Some(false),
+                        },
+                        None => Some(true),
+                    };
+                }
             }
         }
         return None;
@@ -218,10 +264,14 @@ impl<'a> CodeAnalyzer<'a> {
     }
 
     pub fn analyze(&mut self) {
-        if self.options.only_instrument.len() == 0 && self.options.should_instrument() {
+        if self.options.only_instrument_execs.len() == 0 && self.options.should_instrument() {
             let executables = self.extract_instrumentable_executables();
             info!("No explicit binaries provided to instrument. I therefore did my best to find binaries to instrument. I will instrument: {}", executables.iter().map(|x| x.to_string_lossy().to_string()).collect::<Vec<String>>().join(", "));
-            self.options.only_instrument = executables;
+            self.options.only_instrument_execs = executables;
+        }
+
+        if self.options.only_instrument_execs.len() == 0 && self.options.should_instrument() {
+            info!("No explicit functions provided to instrument. I therefore will not limit instrumentation to any functions. (This might be slow!)")
         }
 
         let mut state_buffer: Vec<ExecutionState> = Vec::new();

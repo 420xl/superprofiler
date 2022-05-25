@@ -46,7 +46,7 @@ impl<'a> Profiler<'a> {
                                         "{}\n",
                                         vec.iter()
                                             .map(|x| x.func_name.as_ref().unwrap_or(&default_name))
-                                            .map(|x| format!("{:#}", rustc_demangle::demangle(&x)))
+                                            .map(|x| x.to_string())
                                             .collect::<Vec<String>>()
                                             .join("/")
                                     )
@@ -56,9 +56,8 @@ impl<'a> Profiler<'a> {
                         }
                     }
                     ProfilerMessage::FunctionCall(name) => {
-                        let func = rustc_demangle::demangle(&name);
                         self.function_call_file
-                            .write_all(format!("{}\n", func).as_bytes())
+                            .write_all(format!("{}\n", name).as_bytes())
                             .expect("Unable to write function call to file");
                     }
                 },

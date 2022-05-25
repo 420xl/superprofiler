@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use rand::Rng;
 
 use anyhow::Result;
 use log::debug;
@@ -212,6 +213,7 @@ impl<'a> Supervisor<'a> {
 
         self.alarm_thread = Some(thread::spawn(move || {
             // This will send a SIGTRAP to the tracee periodically
+            let mut rng = rand::thread_rng();
             loop {
                 if !tracee_bool.load(Ordering::Relaxed) {
                     tracee_bool.store(true, Ordering::Relaxed);
@@ -220,7 +222,7 @@ impl<'a> Supervisor<'a> {
                         Err(_) => break, // Process must be gone
                     };
                 }
-                thread::sleep(Duration::from_micros(interval));
+                thread::sleep(Duration::from_micros((rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64));
             }
         }));
 

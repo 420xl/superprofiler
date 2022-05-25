@@ -47,7 +47,11 @@ pub struct Options {
 
     /// Executable instrumentation allowlist
     #[clap(short, long)]
-    only_instrument: Vec<PathBuf>,
+    only_instrument_execs: Vec<PathBuf>,
+
+    /// Function instrumentation allowlist
+    #[clap(short, long)]
+    only_funcs: Option<Vec<String>>,
 
     /// The probability of collecting a trace on any given sample (not from instrumentation) (to disable traces, set to zero) (between zero and one)
     #[clap(short, long, default_value_t = 0.1)]

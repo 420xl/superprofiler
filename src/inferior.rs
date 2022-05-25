@@ -292,22 +292,15 @@ impl Inferior {
 
         loop {
             let ip = cursor.register(RegNum::IP)?;
-
             match (cursor.procedure_info(), cursor.procedure_name()) {
                 (Ok(ref info), Ok(ref name)) if ip == info.start_ip() + name.offset() => {
                     frame.push(Stackframe {
-                        address: ip,
-                        func_name: Some(name.name().to_string()),
+                        address: info.start_ip(),
+                        func_name: Some(format!("{:#}", rustc_demangle::demangle(name.name()))),
                         func_offset: Some(name.offset()),
                     });
                 }
-                _ => {
-                    frame.push(Stackframe {
-                        address: ip,
-                        func_name: None,
-                        func_offset: None,
-                    });
-                }
+                _ => {}
             }
 
             if !cursor.step()? {
