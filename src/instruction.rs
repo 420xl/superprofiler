@@ -1,4 +1,5 @@
 use crate::utils;
+#[cfg(target_arch = "x86_64")]
 use iced_x86::Formatter;
 use std::fmt;
 
@@ -11,7 +12,7 @@ pub struct Instruction {
     pub length: usize,
 }
 
-#[cfg(target_arch = "arm")]
+#[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 fn disassemble_instruction(bytes: &[u8]) -> (usize, String) {
     return (4, None); // For arm, always 4

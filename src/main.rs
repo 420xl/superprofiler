@@ -1,8 +1,9 @@
 use clap::Parser;
 use nix::unistd::Pid;
-extern crate pretty_env_logger;
 use anyhow::anyhow;
 use anyhow::Result;
+
+extern crate pretty_env_logger;
 
 mod analyzer;
 mod inferior;
@@ -77,7 +78,6 @@ fn main() -> Result<()> {
 
     let mut options = Options::parse();
 
-    // Eventually, we'll expand the CLI interface to allow connecting to already-running processes. But for now...
     let process = match (&options.command, &options.pid) {
         (Some(command), None) => inferior::Inferior::from_command(&command),
         (None, Some(pid)) => inferior::Inferior::from_pid(Pid::from_raw(*pid)),

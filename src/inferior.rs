@@ -67,6 +67,15 @@ pub struct Breakpoint {
     pub enabled: bool,
 }
 
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+pub struct c_user_pt_regs {
+    pub regs: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub pstate: u64,
+}
+
 pub struct Inferior {
     pub pid: Pid, // Will also contain profiling data
     pub breakpoints: HashMap<u64, Breakpoint>,
@@ -141,8 +150,53 @@ impl Inferior {
         Ok(signal::kill(self.pid, sig)?)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn get_registers(&mut self) -> Result<libc::user_regs_struct> {
         Ok(ptrace::getregs(self.pid)?)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    /// The following function is adapted from
+    /// https://github.com/markzyu/pcontainer/blob/a5fd85be92699cb25fc3a9fb7b57c4afae7c68f5/ptrace/src/lib.rs
+    pub fn get_registers(&mut self) -> Result<c_user_pt_regs> {
+        let mut data = std::mem::MaybeUninit::uninit();
+        unsafe {
+            let mut iov = libc::iovec {
+                iov_base: data.as_mut_ptr() as *mut _ as *mut libc::c_void,
+                iov_len: std::mem::size_of::<c_user_pt_regs>(),
+            };
+            libc::ptrace(
+                nix::sys::ptrace::Request::PTRACE_GETREGSET as u32,
+                libc::pid_t::from(self.pid),
+                libc::NT_PRSTATUS as *mut libc::c_void,
+                &mut iov as *mut _ as *mut libc::c_void,
+            )
+        };
+        Ok(unsafe { data.assume_init() })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn set_registers(&mut self, regs: libc::user_regs_struct) -> Result<()> {
+        Ok(ptrace::setregs(self.pid, regs)?)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    /// The following function is adapted from
+    /// https://github.com/markzyu/pcontainer/blob/a5fd85be92699cb25fc3a9fb7b57c4afae7c68f5/ptrace/src/lib.rs
+    pub fn set_registers(&mut self, regs: c_user_pt_regs) -> Result<()> {
+        unsafe {
+            let mut iov = libc::iovec {
+                iov_base: &mut regs as *mut _ as *mut libc::c_void,
+                iov_len: std::mem::size_of::<c_user_pt_regs>(),
+            };
+            libc::ptrace(
+                nix::sys::ptrace::Request::PTRACE_SETREGSET as u32,
+                libc::pid_t::from(self.pid),
+                libc::NT_PRSTATUS as *mut libc::c_void,
+                &mut iov as *mut _ as *mut libc::c_void,
+            )
+        };
+        Ok(())
     }
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
@@ -275,10 +329,18 @@ impl Inferior {
     }
 
     pub fn set_instruction_pointer(&mut self, addr: u64) -> Result<()> {
-        let mut regs = ptrace::getregs(self.pid)?;
-        debug!("Setting rip; prev = {}, new = {}", regs.rip, addr);
-        regs.rip = addr;
-        ptrace::setregs(self.pid, regs)?;
+        let mut regs = self.get_registers()?;
+        #[cfg(target_arch = "x86_64")]
+        {
+            debug!("Setting rip; prev = {}, new = {}", regs.rip, addr);
+            regs.rip = addr;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            debug!("Setting pc; prev = {}, new = {}", regs.pc, addr);
+            regs.pc = addr;
+        }
+        self.set_registers(regs)?;
 
         Ok(())
     }
@@ -324,7 +386,11 @@ impl Inferior {
     ) -> Result<ExecutionState> {
         let regs = self.get_registers()?;
 
-        let addr = regs.rip; // TODO: Make platform independent
+        #[cfg(target_arch = "x86_64")]
+        let addr = regs.rip;
+
+        #[cfg(target_arch = "aarch64")]
+        let addr = regs.pc;
 
         let trace = match perform_trace {
             true => match self.trace() {
