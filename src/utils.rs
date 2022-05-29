@@ -1,6 +1,6 @@
 //! Utilities for the superprofiler
 
-use std::{fmt::Write, mem::size_of};
+use std::{fmt::Write};
 
 pub fn offset(a: u64, b: u64) -> i64 {
     if b > a {
@@ -21,11 +21,13 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 }
 
 // From https://reberhardt.com/cs110l/spring-2020/assignments/project-1/
+#[cfg(target_arch = "x86_64")]
 pub fn align_addr_to_word(addr: u64) -> u64 {
-    addr & (-(size_of::<u64>() as isize) as u64)
+    addr & (-(std::mem::size_of::<u64>() as isize) as u64)
 }
 
 #[cfg(test)]
+#[cfg(target_arch = "x86_64")]
 mod tests {
     use crate::utils::align_addr_to_word;
 

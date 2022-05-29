@@ -1,6 +1,5 @@
 use anyhow::Result;
-use log::{debug, info};
-use std::fs::{self, File};
+use std::fs::{File};
 use std::io::Write;
 use std::sync::mpsc::Receiver;
 
@@ -12,6 +11,7 @@ pub enum ProfilerMessage {
 }
 
 pub struct Profiler<'a> {
+    #[allow(dead_code)]
     options: &'a Options,
     receiver: Receiver<ProfilerMessage>,
     function_call_file: File,

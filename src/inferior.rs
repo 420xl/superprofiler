@@ -1,9 +1,8 @@
 use crate::instruction::Instruction;
-use crate::utils;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{debug, info};
 use nix;
 use nix::sys::personality;
 use nix::sys::personality::Persona;
@@ -183,7 +182,7 @@ impl Inferior {
     #[cfg(target_arch = "aarch64")]
     /// The following function is adapted from
     /// https://github.com/markzyu/pcontainer/blob/a5fd85be92699cb25fc3a9fb7b57c4afae7c68f5/ptrace/src/lib.rs
-    pub fn set_registers(&mut self, regs: c_user_pt_regs) -> Result<()> {
+    pub fn set_registers(&mut self, mut regs: c_user_pt_regs) -> Result<()> {
         unsafe {
             let mut iov = libc::iovec {
                 iov_base: &mut regs as *mut _ as *mut libc::c_void,
@@ -201,13 +200,16 @@ impl Inferior {
 
     pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
         if !self.has_breakpoint(addr) {
-            let instruction = Instruction::from_data(self.read_memory(addr, 2)?.as_slice());
+            let instruction = Instruction::from_data(self.read_memory(addr, 2)?.as_slice(), addr);
             debug!("Setting breakpoint at {}", instruction);
 
             // Setup the breakpoint in our own system
             let breakpoint = Breakpoint {
                 address: addr,
+                #[cfg(target_arch = "x86_64")]
                 old_data: self.read_byte(addr)? as u64,
+                #[cfg(target_arch = "aarch64")]
+                old_data: ptrace::read(self.pid, addr as ptrace::AddressType)? as u64,
                 enabled: false,
             };
             self.breakpoints.insert(addr, breakpoint);
@@ -246,12 +248,28 @@ impl Inferior {
             .get_mut(&addr)
             .context("breakpoint not found")?;
         breakpoint.enabled = false;
+
+        #[cfg(target_arch = "x86_64")]
         let to_write = breakpoint.old_data as u8;
+        #[cfg(target_arch = "aarch64")]
+        let to_write = breakpoint.old_data;
+
         debug!(
             "Disabling breakpoint at {:#x}; old data: {}",
             addr, to_write
         );
+
+        #[cfg(target_arch = "x86_64")]
         self.write_byte(addr, to_write)?;
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            ptrace::write(
+                self.pid,
+                addr as ptrace::AddressType,
+                breakpoint.old_data as *mut libc::c_void,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -263,6 +281,7 @@ impl Inferior {
         Ok(())
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn enable_breakpoint(&mut self, addr: u64) -> Result<()> {
         let breakpoint_instruction = 0xCC;
 
@@ -279,7 +298,41 @@ impl Inferior {
         let new_val = self.write_byte(addr, breakpoint_instruction)?;
         if new_val != old_val {
             return Err(anyhow!(
-                "Breakpoint at {:#x} contained byte {} (expected {})",
+                "Breakpoint at {:#x} contained byte {:#x} (expected {:#x})",
+                addr,
+                new_val,
+                old_val
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn enable_breakpoint(&mut self, addr: u64) -> Result<()> {
+        let breakpoint_instruction: u64 = 0xd4200000;
+
+        let breakpoint = self
+            .breakpoints
+            .get_mut(&addr)
+            .context("breakpoint not found")?;
+        breakpoint.enabled = true;
+        debug!(
+            "Enabling breakpoint at {}; old data: {}",
+            addr, breakpoint.old_data
+        );
+        let old_val = breakpoint.old_data;
+        let new_val = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
+        unsafe {
+            ptrace::write(
+                self.pid,
+                addr as ptrace::AddressType,
+                breakpoint_instruction as *mut libc::c_void,
+            )?;
+        }
+        if new_val != old_val {
+            return Err(anyhow!(
+                "Breakpoint at {:#x} contained byte {:#x} (expected {:#x})",
                 addr,
                 new_val,
                 old_val
@@ -299,6 +352,7 @@ impl Inferior {
     }
 
     // The following function is adapted from <https://reberhardt.com/cs110l/spring-2020/assignments/project-1/>
+    #[cfg(target_arch = "x86_64")]
     fn write_byte(&mut self, addr: u64, val: u8) -> Result<u8> {
         if !self.seen_addresses.contains(&addr) {
             debug!("Writing {} to unseen address {:#x}!", val, addr);
@@ -320,6 +374,7 @@ impl Inferior {
         Ok(orig_byte)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn read_byte(&mut self, addr: u64) -> Result<u8> {
         let aligned_addr = utils::align_addr_to_word(addr);
         let byte_offset = addr - aligned_addr;
@@ -402,7 +457,7 @@ impl Inferior {
 
         Ok(ExecutionState {
             address: addr,
-            instruction: Instruction::from_data(self.read_memory(addr, 2)?.as_slice()),
+            instruction: Instruction::from_data(self.read_memory(addr, 2)?.as_slice(), addr),
             time: time::SystemTime::now(),
             exploration_step_id,
             trace,

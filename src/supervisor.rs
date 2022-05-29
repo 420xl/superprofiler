@@ -1,11 +1,11 @@
 use anyhow::anyhow;
+use rand::Rng;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use rand::Rng;
 
 use anyhow::Result;
 use log::debug;
@@ -222,7 +222,9 @@ impl<'a> Supervisor<'a> {
                         Err(_) => break, // Process must be gone
                     };
                 }
-                thread::sleep(Duration::from_micros((rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64));
+                thread::sleep(Duration::from_micros(
+                    (rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64,
+                ));
             }
         }));
 
@@ -239,6 +241,9 @@ impl<'a> Supervisor<'a> {
 
         loop {
             self.iterations += 1;
+            if self.iterations % 1000 == 0 {
+                println!("iterations: {}", self.iterations);
+            }
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
                     let outcome = self.handle_stop(sig_num).expect("Could not handle stop!");

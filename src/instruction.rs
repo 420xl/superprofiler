@@ -3,8 +3,6 @@ use crate::utils;
 use iced_x86::Formatter;
 use std::fmt;
 
-static BITNESS: u32 = 64;
-
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct Instruction {
     pub data: Vec<u8>,
@@ -14,13 +12,21 @@ pub struct Instruction {
 
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
-fn disassemble_instruction(bytes: &[u8]) -> (usize, String) {
-    return (4, None); // For arm, always 4
+fn disassemble_instruction(bytes: &[u8], addr: u64) -> (usize, String) {
+    let instruction = ((bytes[0] as u32) << 0)
+        | ((bytes[1] as u32) << 8)
+        | ((bytes[2] as u32) << 16)
+        | ((bytes[3] as u32) << 24);
+
+    let decoded = bad64::decode(instruction, addr).unwrap();
+
+    return (4, decoded.to_string()); // For ARM, always 4
 }
 
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
-fn disassemble_instruction(bytes: &[u8]) -> (usize, String) {
+fn disassemble_instruction(bytes: &[u8], addr: u64) -> (usize, String) {
+    let BITNESS: u32 = 64;
     let mut decoder = iced_x86::Decoder::new(BITNESS, bytes, iced_x86::DecoderOptions::NONE);
     let instruction = decoder.decode();
     let mut output: String = String::new();
@@ -30,8 +36,8 @@ fn disassemble_instruction(bytes: &[u8]) -> (usize, String) {
 }
 
 impl Instruction {
-    pub fn from_data(data: &[u8]) -> Self {
-        let (length, disassembly) = disassemble_instruction(data);
+    pub fn from_data(data: &[u8], addr: u64) -> Self {
+        let (length, disassembly) = disassemble_instruction(data, addr);
         Self {
             data: data[..length].into(),
             disassembly: Some(disassembly),

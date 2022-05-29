@@ -115,7 +115,11 @@ impl<'a> CodeAnalyzer<'a> {
                                 .send(SupervisorCommand::SetBreakpoint(function.address))?;
                             self.instrumented_addresses.insert(function.address);
                         }
-                        debug!("Function {} starts at {:#x}", function.func_name.as_ref().unwrap(), function.address);
+                        debug!(
+                            "Function {} starts at {:#x}",
+                            function.func_name.as_ref().unwrap(),
+                            function.address
+                        );
                         self.known_function_start_addresses.insert(
                             function.address,
                             function.func_name.as_ref().unwrap().clone(),
@@ -181,10 +185,12 @@ impl<'a> CodeAnalyzer<'a> {
                 self.cmd_tx
                     .send(SupervisorCommand::SetBreakpoint(preceding.address))?;
             } else {
-                debug!(
-                    "Not a branch instruction at {}: {}",
-                    preceding.address, preceding.instruction
-                );
+                if !self.options.no_instrumentation {
+                    debug!(
+                        "Not a branch instruction at {:#x}: {}",
+                        preceding.address, preceding.instruction
+                    );
+                }
             }
         }
 

@@ -1,7 +1,7 @@
-use clap::Parser;
-use nix::unistd::Pid;
 use anyhow::anyhow;
 use anyhow::Result;
+use clap::Parser;
+use nix::unistd::Pid;
 
 extern crate pretty_env_logger;
 
