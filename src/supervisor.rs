@@ -2,8 +2,7 @@ use anyhow::anyhow;
 use rand::Rng;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -33,6 +32,7 @@ pub struct Supervisor<'a> {
     temp_disabled_breakpoint: Option<u64>,
     is_tracee_intentionally_stopped: Arc<AtomicBool>,
     alarm_thread: Option<thread::JoinHandle<()>>,
+    alarm_interrupts: Arc<Mutex<u64>>,
     exploration_step_id: usize,
     exploration_single_steps: usize,
     options: &'a Options,
@@ -62,6 +62,7 @@ impl<'a> Supervisor<'a> {
             temp_disabled_breakpoint: None,
             is_tracee_intentionally_stopped: Arc::new(false.into()),
             alarm_thread: None,
+            alarm_interrupts: Arc::new(Mutex::new(0)),
 
             exploration_step_id: 0,
             exploration_single_steps: 0,
@@ -119,6 +120,9 @@ impl<'a> Supervisor<'a> {
                     true => rand::random::<f32>() < self.options.trace_prob,
                     false => false,
                 };
+
+                // disallow alarm interrupts while handling stop
+                let mut _alarm_interrupts = self.alarm_interrupts.lock().unwrap();
 
                 // Handle trap
                 match self
@@ -211,14 +215,19 @@ impl<'a> Supervisor<'a> {
         let tracee_pid = self.proc.pid;
         let tracee_bool = self.is_tracee_intentionally_stopped.clone();
 
+        let alarm_interrupts = Arc::clone(&self.alarm_interrupts);
         self.alarm_thread = Some(thread::spawn(move || {
             // This will send a SIGTRAP to the tracee periodically
             let mut rng = rand::thread_rng();
             loop {
                 if !tracee_bool.load(Ordering::Relaxed) {
+                    let mut alarm_interrupts = alarm_interrupts.lock().unwrap();
                     tracee_bool.store(true, Ordering::Relaxed);
                     match signal::kill(tracee_pid, Signal::SIGSTOP) {
-                        Ok(_) => debug!("sent SIGSTOP to pid {}", tracee_pid),
+                        Ok(_) => {
+                            *alarm_interrupts += 1;
+                            debug!("sent SIGSTOP to pid {}", tracee_pid);
+                        }
                         Err(_) => break, // Process must be gone
                     };
                 }
@@ -241,9 +250,6 @@ impl<'a> Supervisor<'a> {
 
         loop {
             self.iterations += 1;
-            if self.iterations % 1000 == 0 {
-                println!("iterations: {}", self.iterations);
-            }
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
                     let outcome = self.handle_stop(sig_num).expect("Could not handle stop!");
