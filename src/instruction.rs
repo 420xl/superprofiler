@@ -25,9 +25,9 @@ fn disassemble_instruction(bytes: &[u8], addr: u64) -> (usize, String) {
 
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
-fn disassemble_instruction(bytes: &[u8], addr: u64) -> (usize, String) {
-    let BITNESS: u32 = 64;
-    let mut decoder = iced_x86::Decoder::new(BITNESS, bytes, iced_x86::DecoderOptions::NONE);
+fn disassemble_instruction(bytes: &[u8], _addr: u64) -> (usize, String) {
+    let bitness: u32 = 64;
+    let mut decoder = iced_x86::Decoder::new(bitness, bytes, iced_x86::DecoderOptions::NONE);
     let instruction = decoder.decode();
     let mut output: String = String::new();
     let mut formatter = iced_x86::IntelFormatter::new();

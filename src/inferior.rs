@@ -1,4 +1,5 @@
 use crate::instruction::Instruction;
+use crate::utils;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
@@ -262,14 +263,16 @@ impl Inferior {
         #[cfg(target_arch = "x86_64")]
         self.write_byte(addr, to_write)?;
         #[cfg(target_arch = "aarch64")]
-        let new_val = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
-        let new_val = (((new_val) << 32) >> 32) | (breakpoint.old_data << 32);
-        unsafe {
-            ptrace::write(
-                self.pid,
-                addr as ptrace::AddressType,
-                new_val as *mut libc::c_void,
-            )?;
+        {
+            let new_val = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
+            let new_val = (((new_val) << 32) >> 32) | (breakpoint.old_data << 32);
+            unsafe {
+                ptrace::write(
+                    self.pid,
+                    addr as ptrace::AddressType,
+                    new_val as *mut libc::c_void,
+                )?;
+            }
         }
 
         Ok(())
