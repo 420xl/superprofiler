@@ -262,11 +262,13 @@ impl Inferior {
         #[cfg(target_arch = "x86_64")]
         self.write_byte(addr, to_write)?;
         #[cfg(target_arch = "aarch64")]
+        let new_val = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
+        let new_val = (((new_val) << 32) >> 32) | (breakpoint.old_data << 32);
         unsafe {
             ptrace::write(
                 self.pid,
                 addr as ptrace::AddressType,
-                breakpoint.old_data as *mut libc::c_void,
+                new_val as *mut libc::c_void,
             )?;
         }
 
@@ -310,7 +312,7 @@ impl Inferior {
 
     #[cfg(target_arch = "aarch64")]
     pub fn enable_breakpoint(&mut self, addr: u64) -> Result<()> {
-        let breakpoint_instruction: u64 = 0xd4200000;
+        let breakpoint_instruction: u64 = 0x7EFFEDFE;
 
         let breakpoint = self
             .breakpoints
@@ -323,13 +325,6 @@ impl Inferior {
         );
         let old_val = breakpoint.old_data;
         let new_val = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
-        unsafe {
-            ptrace::write(
-                self.pid,
-                addr as ptrace::AddressType,
-                breakpoint_instruction as *mut libc::c_void,
-            )?;
-        }
         if new_val != old_val {
             return Err(anyhow!(
                 "Breakpoint at {:#x} contained byte {:#x} (expected {:#x})",
@@ -337,6 +332,14 @@ impl Inferior {
                 new_val,
                 old_val
             ));
+        }
+        let new_val = (((new_val) << 32) >> 32) | (breakpoint_instruction << 32);
+        unsafe {
+            ptrace::write(
+                self.pid,
+                addr as ptrace::AddressType,
+                new_val as *mut libc::c_void,
+            )?;
         }
 
         Ok(())
