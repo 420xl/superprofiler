@@ -43,7 +43,7 @@ pub struct Options {
     allow_bottlenecking: bool,
 
     /// Sample interval (microseconds; lower is faster)
-    #[clap(short, long, default_value_t = 1000)]
+    #[clap(short, long, default_value_t = 100)]
     interval: u64,
 
     /// Executable instrumentation allowlist
