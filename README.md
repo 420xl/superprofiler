@@ -8,6 +8,7 @@ Install [Rust](https://rustup.rs/) and the following (if you are on Ubuntu):
 sudo apt-get install build-essential # if you don't have C toolchain
 sudo apt-get install pkg-config
 sudo apt-get install libunwind-dev
+sudo apt-get install -y clang # if you are running AArch64 (ARM64)
 ```
 In order to build the superprofiler, clone this repository and run `cargo build`. Note that installing `libunwind` might be a bottleneck on other operating systems.
 
