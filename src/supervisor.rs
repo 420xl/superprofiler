@@ -114,15 +114,14 @@ impl<'a> Supervisor<'a> {
                         debug!("    ...not intentionally; ignoring...");
                         return Ok(StopOutcome::Nothing);
                     }
+                } else {
+                    debug!("    ...via SIGTRAP!");
                 }
 
                 let collect_trace = match signal == Signal::SIGSTOP || self.options.single {
                     true => rand::random::<f32>() < self.options.trace_prob,
                     false => false,
                 };
-
-                // disallow alarm interrupts while handling stop
-                let mut _alarm_interrupts = self.alarm_interrupts.lock().unwrap();
 
                 // Handle trap
                 match self
@@ -220,16 +219,27 @@ impl<'a> Supervisor<'a> {
             // This will send a SIGTRAP to the tracee periodically
             let mut rng = rand::thread_rng();
             loop {
-                if !tracee_bool.load(Ordering::Relaxed) {
-                    let mut alarm_interrupts = alarm_interrupts.lock().unwrap();
-                    tracee_bool.store(true, Ordering::Relaxed);
-                    match signal::kill(tracee_pid, Signal::SIGSTOP) {
-                        Ok(_) => {
-                            *alarm_interrupts += 1;
-                            debug!("sent SIGSTOP to pid {}", tracee_pid);
+                {
+                    let alarm_interrupts = alarm_interrupts.lock();
+                    match alarm_interrupts {
+                        Ok(mut alarm_interrupts) => {
+                            if !tracee_bool.load(Ordering::Relaxed) {
+                                tracee_bool.store(true, Ordering::Relaxed);
+                                match signal::kill(tracee_pid, Signal::SIGSTOP) {
+                                    Ok(_) => {
+                                        *alarm_interrupts += 1;
+                                        debug!("sent SIGSTOP to pid {}", tracee_pid);
+                                    }
+                                    Err(_) => break, // Process must be gone
+                                };
+                            }
+                        },
+                        Err(_) => {
+                            debug!("Alarm mutex poisoned, killing alarm thread...");
+                            break;
                         }
-                        Err(_) => break, // Process must be gone
-                    };
+                    }
+                    
                 }
                 thread::sleep(Duration::from_micros(
                     (rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64,
@@ -252,6 +262,10 @@ impl<'a> Supervisor<'a> {
             self.iterations += 1;
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
+                    // disallow alarm interrupts while handling stop
+                    let _alarm_interrupts = Arc::clone(&self.alarm_interrupts);
+                    let _alarm_interrupts = _alarm_interrupts.lock().unwrap();
+
                     let outcome = self.handle_stop(sig_num).expect("Could not handle stop!");
 
                     // Execute necessary commands
