@@ -1,6 +1,6 @@
 //! Utilities for the superprofiler
 
-use std::{fmt::Write};
+use std::fmt::Write;
 
 pub fn offset(a: u64, b: u64) -> i64 {
     if b > a {

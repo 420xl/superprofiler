@@ -3,7 +3,7 @@ use crate::utils;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use log::{debug, info};
+use log::{debug, info, warn};
 use nix;
 use nix::sys::personality;
 use nix::sys::personality::Persona;
@@ -48,7 +48,7 @@ pub struct ExecutionState {
 
 pub enum ProcMessage {
     State(ExecutionState),
-    BreakpointHit(u64),
+    BreakpointHit(u64, SystemTime),
 }
 
 impl fmt::Display for ExecutionState {
@@ -361,7 +361,7 @@ impl Inferior {
     #[cfg(target_arch = "x86_64")]
     fn write_byte(&mut self, addr: u64, val: u8) -> Result<u8> {
         if !self.seen_addresses.contains(&addr) {
-            debug!("Writing {} to unseen address {:#x}!", val, addr);
+            warn!("Writing {} to unseen address {:#x}!", val, addr);
         }
 
         let aligned_addr = utils::align_addr_to_word(addr);
@@ -393,12 +393,12 @@ impl Inferior {
         let mut regs = self.get_registers()?;
         #[cfg(target_arch = "x86_64")]
         {
-            debug!("Setting rip; prev = {}, new = {}", regs.rip, addr);
+            debug!("Setting rip; prev = {:#x}, new = {:#x}", regs.rip, addr);
             regs.rip = addr;
         }
         #[cfg(target_arch = "aarch64")]
         {
-            debug!("Setting pc; prev = {}, new = {}", regs.pc, addr);
+            debug!("Setting pc; prev = {:#x}, new = {:#x}", regs.pc, addr);
             regs.pc = addr;
         }
         self.set_registers(regs)?;

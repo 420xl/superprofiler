@@ -11,12 +11,14 @@ use std::collections::hash_map::Entry::Occupied;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::time::SystemTime;
 
 pub struct CodeAnalyzer<'a> {
     known_branching_instructions: HashSet<Instruction>,
     instrumented_addresses: HashSet<u64>,
     seen_addresses: HashMap<u64, u64>,
     known_function_start_addresses: HashMap<u64, String>,
+    known_address_stackframes: HashMap<u64, Stackframe>,
     known_function_addresses: HashMap<u64, Stackframe>,
     breakpoint_hits: HashMap<u64, u64>,
     total_breakpoint_hits: u64,
@@ -43,6 +45,7 @@ impl<'a> CodeAnalyzer<'a> {
             breakpoint_hits: HashMap::new(),
             known_function_start_addresses: HashMap::new(),
             known_function_addresses: HashMap::new(),
+            known_address_stackframes: HashMap::new(),
             total_breakpoint_hits: 0,
             proc_map: None,
             profiler_tx,
@@ -53,10 +56,17 @@ impl<'a> CodeAnalyzer<'a> {
         }
     }
 
-    pub fn ingest_breakpoint_hit(&mut self, addr: u64) -> Result<()> {
+    pub fn ingest_breakpoint_hit(&mut self, addr: u64, time: SystemTime) -> Result<()> {
         let counter = self.breakpoint_hits.entry(addr).or_insert(0);
         *counter += 1;
         self.total_breakpoint_hits += 1;
+
+        let stackframe = match self.known_address_stackframes.get(&addr) {
+            Some(value) => Some(value.clone()),
+            None => None,
+        };
+        self.profiler_tx
+            .send(ProfilerMessage::BreakpointHit(addr, stackframe, time))?;
 
         if !self.options.allow_bottlenecking
             && self.total_breakpoint_hits > 50000
@@ -82,19 +92,24 @@ impl<'a> CodeAnalyzer<'a> {
                 self.known_function_addresses
                     .entry(state.address)
                     .or_insert_with(|| bottom.clone());
+                self.known_address_stackframes
+                    .insert(state.address, bottom.clone());
             }
 
             for function in stack
                 .iter()
                 .skip(self.options.func_instrumentation_depth.try_into()?)
             {
+                self.known_address_stackframes
+                    .insert(function.address, function.clone());
+
                 if function.func_name.is_some() {
                     // Remember that this function strat address corresponds to this function
                     self.known_function_addresses
                         .entry(function.address)
                         .or_insert_with(|| function.clone());
 
-                    // Also record the function _start_ addresses
+                    // Also record and instrument the function _start_ addresses
                     if !self
                         .known_function_start_addresses
                         .contains_key(&function.address)
@@ -162,6 +177,7 @@ impl<'a> CodeAnalyzer<'a> {
             if !self.options.no_instrumentation
                 && preceding.address + size as u64 != following.address
                 && preceding.address != following.address
+                && preceding.instruction.data.len() != 1 // Hack
                 && !preceding.instruction.is_breakpoint()
                 && !self.instrumented_addresses.contains(&preceding.address)
                 && self
@@ -297,8 +313,8 @@ impl<'a> CodeAnalyzer<'a> {
                             state_buffer.push(state);
                         }
                     }
-                    ProcMessage::BreakpointHit(addr) => {
-                        self.ingest_breakpoint_hit(addr)
+                    ProcMessage::BreakpointHit(addr, time) => {
+                        self.ingest_breakpoint_hit(addr, time)
                             .expect("Unable to ingest breakpoint hit!");
                     }
                 },

@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use log::debug;
@@ -30,7 +31,9 @@ pub struct Supervisor<'a> {
     iterations: u64,
     breakpoint_hits: u64,
     temp_disabled_breakpoint: Option<u64>,
+    recently_reenabled_breakpoint: Option<u64>,
     is_tracee_intentionally_stopped: Arc<AtomicBool>,
+    should_alarm_fire: Arc<AtomicBool>,
     alarm_thread: Option<thread::JoinHandle<()>>,
     alarm_interrupts: Arc<Mutex<u64>>,
     exploration_step_id: usize,
@@ -60,7 +63,9 @@ impl<'a> Supervisor<'a> {
             iterations: 0,
             breakpoint_hits: 0,
             temp_disabled_breakpoint: None,
+            recently_reenabled_breakpoint: None,
             is_tracee_intentionally_stopped: Arc::new(false.into()),
+            should_alarm_fire: Arc::new(true.into()),
             alarm_thread: None,
             alarm_interrupts: Arc::new(Mutex::new(0)),
 
@@ -82,9 +87,10 @@ impl<'a> Supervisor<'a> {
                 self.proc
                     .enable_breakpoint(bp)
                     .expect("unable to re-enable breakpoint");
-                debug!("Re-enabled breakpoint!");
+                debug!("Re-enabled breakpoint at {:#x}!", bp);
             }
             self.temp_disabled_breakpoint = None;
+            self.recently_reenabled_breakpoint = Some(bp);
         }
     }
 
@@ -129,25 +135,35 @@ impl<'a> Supervisor<'a> {
                     .get_execution_state(Some(self.exploration_step_id), collect_trace)
                 {
                     Ok(state) => {
-                        if !self.proc.has_breakpoint(state.address - 1) {
+                        debug!("[{}] Trapped at {}", self.iterations, state);
+                        let actual_breakpoint_address = state.address - 1;
+                        if !self.proc.has_breakpoint(actual_breakpoint_address) {
                             self.proc.seen_addresses.insert(state.address);
                         }
-
-                        debug!("[{}] Trapped at {}", self.iterations, state);
-                        let prev_bkpt = state.address - 1;
-                        if self.proc.has_breakpoint_enabled(prev_bkpt) && signal == Signal::SIGTRAP
+                        if let Some(value) = self.recently_reenabled_breakpoint {
+                            debug!("Just stepped past breakpoint; location: {:#x}, current loc: {:#x}", value, state.address);
+                        }
+                        if self.options.single {
+                            self.info_tx
+                                .send(ProcMessage::BreakpointHit(actual_breakpoint_address, SystemTime::now()))?;
+                        }
+                        if self.proc.has_breakpoint_enabled(actual_breakpoint_address)
+                            && signal == Signal::SIGTRAP
+                            // Make sure we don't repeat the recently reenabled breakpoint if the true instruction is indeed one byte
+                            && self.recently_reenabled_breakpoint.unwrap_or(0) != actual_breakpoint_address
                         {
                             assert!(self.temp_disabled_breakpoint.is_none());
                             debug!(
                                 "[{}] Hit breakpoint at {:#x}",
-                                self.iterations, state.address
+                                self.iterations, actual_breakpoint_address
                             );
                             self.breakpoint_hits += 1;
-                            self.info_tx.send(ProcMessage::BreakpointHit(prev_bkpt))?;
+                            self.info_tx
+                                .send(ProcMessage::BreakpointHit(actual_breakpoint_address, SystemTime::now()))?;
 
-                            self.proc.disable_breakpoint(prev_bkpt)?;
-                            self.proc.set_instruction_pointer(prev_bkpt)?;
-                            self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
+                            self.proc.disable_breakpoint(actual_breakpoint_address)?;
+                            self.proc.set_instruction_pointer(actual_breakpoint_address)?;
+                            self.temp_disabled_breakpoint = Some(actual_breakpoint_address); // We will re-enable post single stepping
                             return Ok(StopOutcome::Step(None));
                         } else {
                             self.info_tx.send(ProcMessage::State(state.clone()))?;
@@ -180,11 +196,15 @@ impl<'a> Supervisor<'a> {
                     .proc
                     .get_execution_state(Some(self.exploration_step_id), true);
                 if let Ok(state) = maybe_state {
+                    #[cfg(target_arch="x86_64")]
+                    let potential_breakpoint_address = state.address - 1;
+                    #[cfg(target_arch="aarch64")]
+                    let potential_breakpoint_address = state.address - 8;
                     error!(
                         "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints]",
                         self.iterations,
                         state,
-                        self.proc.has_breakpoint(state.address - 1),
+                        potential_breakpoint_address,
                         self.proc.breakpoints.len()
                     );
                 } else {
@@ -215,35 +235,28 @@ impl<'a> Supervisor<'a> {
         let tracee_bool = self.is_tracee_intentionally_stopped.clone();
 
         let alarm_interrupts = Arc::clone(&self.alarm_interrupts);
+        let should_fire = Arc::clone(&self.should_alarm_fire);
         self.alarm_thread = Some(thread::spawn(move || {
             // This will send a SIGTRAP to the tracee periodically
             let mut rng = rand::thread_rng();
             loop {
-                {
-                    let alarm_interrupts = alarm_interrupts.lock();
-                    match alarm_interrupts {
-                        Ok(mut alarm_interrupts) => {
-                            if !tracee_bool.load(Ordering::Relaxed) {
-                                tracee_bool.store(true, Ordering::Relaxed);
-                                match signal::kill(tracee_pid, Signal::SIGSTOP) {
-                                    Ok(_) => {
-                                        *alarm_interrupts += 1;
-                                        debug!("sent SIGSTOP to pid {}", tracee_pid);
-                                    }
-                                    Err(_) => break, // Process must be gone
-                                };
-                            }
-                        },
-                        Err(_) => {
-                            debug!("Alarm mutex poisoned, killing alarm thread...");
-                            break;
+                if !tracee_bool.load(Ordering::Relaxed) && should_fire.load(Ordering::Relaxed) {
+                    let mut alarm_interrupts = alarm_interrupts.lock().unwrap();
+                    tracee_bool.store(true, Ordering::Relaxed);
+                    match signal::kill(tracee_pid, Signal::SIGSTOP) {
+                        Ok(_) => {
+                            *alarm_interrupts += 1;
+                            debug!("sent SIGSTOP to pid {}", tracee_pid);
                         }
+                        Err(_) => todo!(),
                     }
                     
                 }
-                thread::sleep(Duration::from_micros(
+                let dur = Duration::from_micros(
                     (rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64,
-                ));
+                );
+                debug!("Sleeping for {:?}", dur);
+                thread::sleep(dur);
             }
         }));
 
@@ -262,30 +275,41 @@ impl<'a> Supervisor<'a> {
             self.iterations += 1;
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
-                    // disallow alarm interrupts while handling stop
-                    let _alarm_interrupts = Arc::clone(&self.alarm_interrupts);
-                    let _alarm_interrupts = _alarm_interrupts.lock().unwrap();
+                    // Stop the alarm!
+                    self.should_alarm_fire.store(false, Ordering::Relaxed);
 
-                    let outcome = self.handle_stop(sig_num).expect("Could not handle stop!");
+                    // Re-enable temporarily disabled breakpoint
+                    self.reenable_stepping_breakpoint();
+
+                    let outcome = self.handle_stop(sig_num).expect("Error handling stop");
+
+                    // self.reenable_stepping_breakpoint() temporarily stores the `recently_reenabled_breakpoint` to be used in `handle_stop`
+                    self.recently_reenabled_breakpoint = None;
 
                     // Execute necessary commands
                     if let Err(err) = self.execute_incoming_commands() {
                         error!("error executing commands: {}", err);
                     }
 
-                    // Re-enable temporarily disabled breakpoints
-                    self.reenable_stepping_breakpoint();
-
                     match outcome {
                         StopOutcome::Continue(sig) => {
                             if self.options.single {
+                                debug!("[{}] Continuing via STEPPING!", self.iterations);
                                 self.proc.step(sig)?
                             } else {
-                                self.proc.cont(sig)?
+                                debug!("[{}] Continuing via CONT!", self.iterations);
+                                let res = self.proc.cont(sig);
+                                self.should_alarm_fire.store(true, Ordering::Relaxed);
+                                res?
                             }
                         }
-                        StopOutcome::Step(sig) => self.proc.step(sig)?,
-                        StopOutcome::Nothing => {}
+                        StopOutcome::Step(sig) => {
+                            debug!("[{}] Continuing via STEPPING!", self.iterations);
+                            self.proc.step(sig)?
+                        }
+                        StopOutcome::Nothing => {
+                            debug!("[{}] Doing nothing!", self.iterations);
+                        }
                     }
                 }
 
