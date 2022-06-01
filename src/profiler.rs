@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::info;
 use std::fs::File;
 use std::io::Write;
 use std::process::Command;
@@ -23,17 +24,21 @@ pub struct Profiler<'a> {
     hits_file: File,
 }
 
+fn file_path(options: &Options, name: &str) -> String {
+    return format!("{}_{}", options.name.as_ref().unwrap(), name);
+}
+
 impl<'a> Profiler<'a> {
     pub fn new(receiver: Receiver<ProfilerMessage>, options: &'a Options) -> Result<Self> {
-        let mut hits_file = File::create(format!("{}_hits.tsv", options.name.as_ref().unwrap()))?;
+        let mut hits_file = File::create(file_path(options, "hits.tsv"))?;
         hits_file
             .write("address\tfunc_name\tfunc_offset\ttime\n".as_bytes())
             .expect("unable to write header to hits file");
 
         let function_call_file =
-            File::create(format!("{}_calls.txt", options.name.as_ref().unwrap()))?;
+            File::create(file_path(options, "calls.txt"))?;
         let stacktrace_file =
-            File::create(format!("{}_stacks.txt", options.name.as_ref().unwrap()))?;
+            File::create(file_path(options, "stacks.txt"))?;
 
         Ok(Self {
             options,
@@ -108,12 +113,16 @@ impl<'a> Profiler<'a> {
         }
 
         if self.options.flame {
-            self.stacktrace_file.flush();
-            Command::new("inferno-flamegraph")
-                .arg(self.stacktrace_file.metadata().)
-                .arg(format!("inferno-flamegraph < ")
+            info!("Generating flamegraph 🔥🔥🔥");
+            self.stacktrace_file.flush().expect("unable to flush stack file");
+            let output = Command::new("inferno-flamegraph")
+                .arg(file_path(self.options, "stacks.txt"))
                 .output()
-                .expect("failed to execute process")
+                .expect("failed to execute process");
+            let mut flame_file = File::create(file_path(self.options, "flamegraph.svg")).expect("unable to create flamegraph file");
+            flame_file
+                .write(&output.stdout)
+                .expect("unable to write flamegraph");
         }
     }
 }
