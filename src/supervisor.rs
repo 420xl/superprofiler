@@ -248,7 +248,7 @@ impl<'a> Supervisor<'a> {
                             *alarm_interrupts += 1;
                             debug!("sent SIGSTOP to pid {}", tracee_pid);
                         }
-                        Err(_) => todo!(),
+                        Err(_) => break,
                     }
                     
                 }
