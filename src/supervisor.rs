@@ -33,7 +33,6 @@ pub struct Supervisor<'a> {
     temp_disabled_breakpoint: Option<u64>,
     recently_reenabled_breakpoint: Option<u64>,
     is_tracee_intentionally_stopped: Arc<AtomicBool>,
-    should_alarm_fire: Arc<AtomicBool>,
     alarm_thread: Option<thread::JoinHandle<()>>,
     alarm_interrupts: Arc<Mutex<u64>>,
     exploration_step_id: usize,
@@ -65,7 +64,6 @@ impl<'a> Supervisor<'a> {
             temp_disabled_breakpoint: None,
             recently_reenabled_breakpoint: None,
             is_tracee_intentionally_stopped: Arc::new(false.into()),
-            should_alarm_fire: Arc::new(true.into()),
             alarm_thread: None,
             alarm_interrupts: Arc::new(Mutex::new(0)),
 
@@ -235,12 +233,11 @@ impl<'a> Supervisor<'a> {
         let tracee_bool = self.is_tracee_intentionally_stopped.clone();
 
         let alarm_interrupts = Arc::clone(&self.alarm_interrupts);
-        let should_fire = Arc::clone(&self.should_alarm_fire);
         self.alarm_thread = Some(thread::spawn(move || {
             // This will send a SIGTRAP to the tracee periodically
             let mut rng = rand::thread_rng();
             loop {
-                if !tracee_bool.load(Ordering::Relaxed) && should_fire.load(Ordering::Relaxed) {
+                if !tracee_bool.load(Ordering::Relaxed) {
                     let mut alarm_interrupts = alarm_interrupts.lock().unwrap();
                     tracee_bool.store(true, Ordering::Relaxed);
                     match signal::kill(tracee_pid, Signal::SIGSTOP) {
@@ -275,9 +272,6 @@ impl<'a> Supervisor<'a> {
             self.iterations += 1;
             match self.proc.wait(None) {
                 Ok(WaitStatus::Stopped(_, sig_num)) => {
-                    // Stop the alarm!
-                    self.should_alarm_fire.store(false, Ordering::Relaxed);
-
                     // Re-enable temporarily disabled breakpoint
                     self.reenable_stepping_breakpoint();
 
@@ -299,7 +293,6 @@ impl<'a> Supervisor<'a> {
                             } else {
                                 debug!("[{}] Continuing via CONT!", self.iterations);
                                 let res = self.proc.cont(sig);
-                                self.should_alarm_fire.store(true, Ordering::Relaxed);
                                 res?
                             }
                         }
