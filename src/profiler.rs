@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::fs::File;
 use std::io::Write;
+use std::process::Command;
 use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 
@@ -104,6 +105,15 @@ impl<'a> Profiler<'a> {
                 },
                 Err(_) => break,
             }
+        }
+
+        if self.options.flame {
+            self.stacktrace_file.flush();
+            Command::new("inferno-flamegraph")
+                .arg(self.stacktrace_file.metadata().)
+                .arg(format!("inferno-flamegraph < ")
+                .output()
+                .expect("failed to execute process")
         }
     }
 }
