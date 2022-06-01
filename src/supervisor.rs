@@ -127,9 +127,6 @@ impl<'a> Supervisor<'a> {
                     false => false,
                 };
 
-                // disallow alarm interrupts while handling stop
-                let mut _alarm_interrupts = self.alarm_interrupts.lock().unwrap();
-
                 // Handle trap
                 match self
                     .proc
@@ -137,8 +134,8 @@ impl<'a> Supervisor<'a> {
                 {
                     Ok(state) => {
                         debug!("[{}] Trapped at {}", self.iterations, state);
-                        let prev_bkpt = state.address - 1;
-                        if !self.proc.has_breakpoint(prev_bkpt) {
+                        let actual_breakpoint_address = state.address - 1;
+                        if !self.proc.has_breakpoint(actual_breakpoint_address) {
                             self.proc.seen_addresses.insert(state.address);
                         }
                         if let Some(value) = self.recently_reenabled_breakpoint {
@@ -146,25 +143,25 @@ impl<'a> Supervisor<'a> {
                         }
                         if self.options.single {
                             self.info_tx
-                                .send(ProcMessage::BreakpointHit(prev_bkpt, SystemTime::now()))?;
+                                .send(ProcMessage::BreakpointHit(actual_breakpoint_address, SystemTime::now()))?;
                         }
-                        if self.proc.has_breakpoint_enabled(prev_bkpt)
+                        if self.proc.has_breakpoint_enabled(actual_breakpoint_address)
                             && signal == Signal::SIGTRAP
                             // Make sure we don't repeat the recently reenabled breakpoint if the true instruction is indeed one byte
-                            && self.recently_reenabled_breakpoint.unwrap_or(0) != prev_bkpt
+                            && self.recently_reenabled_breakpoint.unwrap_or(0) != actual_breakpoint_address
                         {
                             assert!(self.temp_disabled_breakpoint.is_none());
                             debug!(
                                 "[{}] Hit breakpoint at {:#x}",
-                                self.iterations, state.address
+                                self.iterations, actual_breakpoint_address
                             );
                             self.breakpoint_hits += 1;
                             self.info_tx
-                                .send(ProcMessage::BreakpointHit(prev_bkpt, SystemTime::now()))?;
+                                .send(ProcMessage::BreakpointHit(actual_breakpoint_address, SystemTime::now()))?;
 
-                            self.proc.disable_breakpoint(prev_bkpt)?;
-                            self.proc.set_instruction_pointer(prev_bkpt)?;
-                            self.temp_disabled_breakpoint = Some(prev_bkpt); // We will re-enable post single stepping
+                            self.proc.disable_breakpoint(actual_breakpoint_address)?;
+                            self.proc.set_instruction_pointer(actual_breakpoint_address)?;
+                            self.temp_disabled_breakpoint = Some(actual_breakpoint_address); // We will re-enable post single stepping
                             return Ok(StopOutcome::Step(None));
                         } else {
                             self.info_tx.send(ProcMessage::State(state.clone()))?;
@@ -197,11 +194,15 @@ impl<'a> Supervisor<'a> {
                     .proc
                     .get_execution_state(Some(self.exploration_step_id), true);
                 if let Ok(state) = maybe_state {
+                    #[cfg(target_arch="x86_64")]
+                    let potential_breakpoint_address = state.address - 1;
+                    #[cfg(target_arch="aarch64")]
+                    let potential_breakpoint_address = state.address - 8;
                     error!(
                         "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints]",
                         self.iterations,
                         state,
-                        self.proc.has_breakpoint(state.address - 1),
+                        potential_breakpoint_address,
                         self.proc.breakpoints.len()
                     );
                 } else {
@@ -244,8 +245,9 @@ impl<'a> Supervisor<'a> {
                             *alarm_interrupts += 1;
                             debug!("sent SIGSTOP to pid {}", tracee_pid);
                         }
-                        Err(_) => break, // Process must be gone
-                    };
+                        Err(_) => todo!(),
+                    }
+                    
                 }
                 let dur = Duration::from_micros(
                     (rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64,

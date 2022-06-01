@@ -463,7 +463,10 @@ impl Inferior {
 
         Ok(ExecutionState {
             address: addr,
+            #[cfg(target_arch = "x86_64")]
             instruction: Instruction::from_data(self.read_memory(addr, 2)?.as_slice(), addr),
+            #[cfg(target_arch = "aarch64")]
+            instruction: Instruction::from_data(self.read_memory(addr, 1)?.as_slice(), addr),
             time: time::SystemTime::now(),
             exploration_step_id,
             trace,
