@@ -38,6 +38,10 @@ pub struct Options {
     #[clap(short, long)]
     no_instrumentation: bool,
 
+    /// Generate flamegraph after execution completes (requires `inferno-flamegraph` to be installed)
+    #[clap(long)]
+    flame: bool,
+
     /// Allow bottlenecking in instrumentation
     #[clap(short, long)]
     allow_bottlenecking: bool,

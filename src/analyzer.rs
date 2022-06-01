@@ -177,6 +177,7 @@ impl<'a> CodeAnalyzer<'a> {
             if !self.options.no_instrumentation
                 && preceding.address + size as u64 != following.address
                 && preceding.address != following.address
+                && preceding.instruction.data.len() != 1 // Hack
                 && !preceding.instruction.is_breakpoint()
                 && !self.instrumented_addresses.contains(&preceding.address)
                 && self

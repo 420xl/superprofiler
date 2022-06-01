@@ -250,9 +250,11 @@ impl<'a> Supervisor<'a> {
                         Err(_) => break, // Process must be gone
                     };
                 }
-                thread::sleep(Duration::from_micros(
+                let dur = Duration::from_micros(
                     (rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64,
-                ));
+                );
+                debug!("Sleeping for {:?}", dur);
+                thread::sleep(dur);
             }
         }));
 
