@@ -32,7 +32,7 @@ Currently, the superprofiler supports AArch64 (sort of) and x86 (fully).
 
 ```
 superprofiler 0.1.0
-A smart profiler
+A smart profiler (experimental!)
 
 USAGE:
     superprofiler [OPTIONS]
