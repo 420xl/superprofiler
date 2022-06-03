@@ -168,7 +168,7 @@ impl<'a> Supervisor<'a> {
 
                             // If there have been fewer than 500 single steps (TODO: make this configurable),
                             // then that means we are still in "exploration mode" — looking for jumps.
-                            if self.exploration_single_steps < 500 {
+                            if self.exploration_single_steps < 500 && !self.options.no_instrumentation {
                                 self.exploration_single_steps += 1;
                                 return Ok(StopOutcome::Step(None));
                             } else {

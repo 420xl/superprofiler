@@ -348,10 +348,10 @@ impl Inferior {
         Ok(())
     }
 
-    pub fn read_memory(&mut self, addr: u64, words: u8) -> Result<Vec<u8>> {
-        let mut vec: Vec<u8> = Vec::with_capacity(words.into());
-        for _ in 0..words {
-            let value: u64 = ptrace::read(self.pid, addr as *mut libc::c_void)? as u64;
+    pub fn read_memory(&mut self, addr: u64, chunks: u8) -> Result<Vec<u8>> {
+        let mut vec: Vec<u8> = Vec::with_capacity(chunks.into());
+        for i in 0..chunks {
+            let value: u64 = ptrace::read(self.pid, (addr + i as u64) as *mut libc::c_void)? as u64;
             vec.extend(value.to_le_bytes());
         }
         Ok(vec)

@@ -110,8 +110,8 @@ int spin(void) {
 }
 
 int foo(void) {
-    for(int i=1;i<=1000;i++) {
-        printf("%d: %d\n",i,xcrc32((char *)&i, 1, 0)); 
+    for(int i=1;i<=250;i++) {
+        printf("%d: %d\n",i,xcrc32((char *)&i, sizeof(i), 0)); 
         spin();
     }
 }
