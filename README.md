@@ -130,15 +130,14 @@ superprofiler -p $(pgrep executable...)
 
 ## Dynamic Code Analysis
 
-The first goal of the dynamic code analyzer is to figure out which instruction encodings are branches. In order to accomplish this it:
+The goal of the dynamic code analyzer is to figure out which instruction encodings are branches and to insert breakpoints at their locations in order to increase profiling resolution. In order to accomplish this it:
 
-1. Single steps through the process it is attached to, monitors changes in pc that reflects a branch and stores the encoding of the instruction that resulted in the change.
-2. Predicts what opcodes/instruction encodings might map into a branch. Our goal is to exit single stepping as soon as possible, and only interrupt the program when we suspect that we have reached the end of a basic block.
+1. Periodically single steps the program that's being profiled for a certain amount of instructions and checks if any of the instructions changed the `pc` (or `rip` on x86) by more than the instruction length.
 
-    > Certain instructions ("pop {pc}", "movs pc, lr") result in a change only when the destination register is the program counter. In this case, we cannot rely only on the opcode information. On the other hand, recognizing patterns among opcodes of branch instructions help us predict what instructions result in a branch, and we can exit single stepping mode as soon as possible + handle instruction encodings that we have not encountered before.
+    > Certain instructions (i.e. `pop {pc}` and `movs pc, lr`) result in a change only when the destination register is the program counter. In such cases we cannot rely on the opcode information alone and need to compare two consecutive instructions to infer whether it was a branch
+2. If so, it inserts a breakpoint at that address, recording the original instruction in a hash map in order to execute it later when the breakpoint is hit.
+3. Meanwhile, the profiler stops the program (by sending SIGSTOP to the child process) at periodic intervals and collects the trace at the current instruction. 
 
-3. Exits single stepping, adding breakpoints to a predicted branch. We need to come up with some metric that decides that we have sufficiently collected information about branch instructions.
-4. To make things faster, (perhaps) keeps a lookup table of possible branch points of an instruction located at a particular address + keep a list of branch opcodes for widely-used instruction sets. 
 
 ## Challenges
 
