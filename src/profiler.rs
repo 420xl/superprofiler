@@ -35,10 +35,8 @@ impl<'a> Profiler<'a> {
             .write("address\tfunc_name\tfunc_offset\ttime\n".as_bytes())
             .expect("unable to write header to hits file");
 
-        let function_call_file =
-            File::create(file_path(options, "calls.txt"))?;
-        let stacktrace_file =
-            File::create(file_path(options, "stacks.txt"))?;
+        let function_call_file = File::create(file_path(options, "calls.txt"))?;
+        let stacktrace_file = File::create(file_path(options, "stacks.txt"))?;
 
         Ok(Self {
             options,
@@ -114,12 +112,15 @@ impl<'a> Profiler<'a> {
 
         if self.options.flame {
             info!("Generating flamegraph 🔥🔥🔥");
-            self.stacktrace_file.flush().expect("unable to flush stack file");
+            self.stacktrace_file
+                .flush()
+                .expect("unable to flush stack file");
             let output = Command::new("inferno-flamegraph")
                 .arg(file_path(self.options, "stacks.txt"))
                 .output()
                 .expect("failed to execute process");
-            let mut flame_file = File::create(file_path(self.options, "flamegraph.svg")).expect("unable to create flamegraph file");
+            let mut flame_file = File::create(file_path(self.options, "flamegraph.svg"))
+                .expect("unable to create flamegraph file");
             flame_file
                 .write(&output.stdout)
                 .expect("unable to write flamegraph");

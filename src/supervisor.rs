@@ -139,11 +139,16 @@ impl<'a> Supervisor<'a> {
                             self.proc.seen_addresses.insert(state.address);
                         }
                         if let Some(value) = self.recently_reenabled_breakpoint {
-                            debug!("Just stepped past breakpoint; location: {:#x}, current loc: {:#x}", value, state.address);
+                            debug!(
+                                "Just stepped past breakpoint; location: {:#x}, current loc: {:#x}",
+                                value, state.address
+                            );
                         }
                         if self.options.single {
-                            self.info_tx
-                                .send(ProcMessage::BreakpointHit(actual_breakpoint_address, SystemTime::now()))?;
+                            self.info_tx.send(ProcMessage::BreakpointHit(
+                                actual_breakpoint_address,
+                                SystemTime::now(),
+                            ))?;
                         }
                         if self.proc.has_breakpoint_enabled(actual_breakpoint_address)
                             && signal == Signal::SIGTRAP
@@ -156,11 +161,14 @@ impl<'a> Supervisor<'a> {
                                 self.iterations, actual_breakpoint_address
                             );
                             self.breakpoint_hits += 1;
-                            self.info_tx
-                                .send(ProcMessage::BreakpointHit(actual_breakpoint_address, SystemTime::now()))?;
+                            self.info_tx.send(ProcMessage::BreakpointHit(
+                                actual_breakpoint_address,
+                                SystemTime::now(),
+                            ))?;
 
                             self.proc.disable_breakpoint(actual_breakpoint_address)?;
-                            self.proc.set_instruction_pointer(actual_breakpoint_address)?;
+                            self.proc
+                                .set_instruction_pointer(actual_breakpoint_address)?;
                             self.temp_disabled_breakpoint = Some(actual_breakpoint_address); // We will re-enable post single stepping
                             return Ok(StopOutcome::Step(None));
                         } else {
@@ -168,7 +176,9 @@ impl<'a> Supervisor<'a> {
 
                             // If there have been fewer than 500 single steps (TODO: make this configurable),
                             // then that means we are still in "exploration mode" — looking for jumps.
-                            if self.exploration_single_steps < 500 && !self.options.no_instrumentation {
+                            if self.exploration_single_steps < 500
+                                && !self.options.no_instrumentation
+                            {
                                 self.exploration_single_steps += 1;
                                 return Ok(StopOutcome::Step(None));
                             } else {
@@ -194,9 +204,9 @@ impl<'a> Supervisor<'a> {
                     .proc
                     .get_execution_state(Some(self.exploration_step_id), true);
                 if let Ok(state) = maybe_state {
-                    #[cfg(target_arch="x86_64")]
+                    #[cfg(target_arch = "x86_64")]
                     let potential_breakpoint_address = state.address - 1;
-                    #[cfg(target_arch="aarch64")]
+                    #[cfg(target_arch = "aarch64")]
                     let potential_breakpoint_address = state.address - 8;
                     error!(
                         "[{}] Hit segmentation fault at {} [breakpoint = {}] [set {} breakpoints]",
@@ -247,7 +257,6 @@ impl<'a> Supervisor<'a> {
                         }
                         Err(_) => break,
                     }
-                    
                 }
                 let dur = Duration::from_micros(
                     (rng.gen::<f64>() * (interval as f64) * 2f64).round() as u64,
